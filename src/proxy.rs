@@ -33,6 +33,7 @@ struct UpstreamState {
     config: UpstreamConfig,
     client: Client,
     model_cache: tokio::sync::RwLock<Option<CachedModels>>,
+    model_cache_refresh: tokio::sync::Mutex<()>,
     concurrency_limit: Option<Arc<tokio::sync::Semaphore>>,
     request_limiter: Option<FixedWindowRateLimiter>,
     token_limiter: Option<FixedWindowRateLimiter>,
@@ -76,6 +77,9 @@ impl AppState {
                 ))
             })
             .collect::<Vec<_>>();
+        if upstreams.len() > 1 {
+            spawn_model_cache_warmup(upstreams.clone());
+        }
         if config.health.enabled {
             spawn_health_checks(
                 upstreams.clone(),
@@ -132,6 +136,7 @@ impl UpstreamState {
             config,
             client,
             model_cache: tokio::sync::RwLock::new(None),
+            model_cache_refresh: tokio::sync::Mutex::new(()),
             concurrency_limit,
             request_limiter,
             token_limiter,
@@ -264,6 +269,19 @@ fn spawn_health_checks(
                     .await;
             }
             tokio::time::sleep(interval).await;
+        }
+    });
+}
+
+fn spawn_model_cache_warmup(upstreams: Vec<Arc<UpstreamState>>) {
+    tokio::spawn(async move {
+        for upstream in upstreams {
+            if let Err(status) = fetch_model_items_cached(&upstream, "[startup]").await {
+                tracing::warn!(
+                    "[startup] failed to prefetch upstream {} models: {status}",
+                    upstream.config.url
+                );
+            }
         }
     });
 }
@@ -501,6 +519,15 @@ async fn fetch_model_items_cached(
         "{label} model cache miss for upstream {}",
         upstream.config.url
     );
+    let _refresh = upstream.model_cache_refresh.lock().await;
+    if let Some(items) = upstream.fresh_model_items().await {
+        tracing::debug!(
+            "{label} model cache hit after waiting for upstream {} with {} models",
+            upstream.config.url,
+            items.len()
+        );
+        return Ok(items);
+    }
     match fetch_model_items(upstream, label).await {
         Ok(items) => Ok(items),
         Err(status) => {
@@ -2305,6 +2332,96 @@ url = "{}"
         assert_eq!(upstream_a_model_calls.load(Ordering::SeqCst), 1);
         assert_eq!(upstream_b_model_calls.load(Ordering::SeqCst), 1);
         assert_eq!(upstream_b_called.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn startup_should_prefetch_model_lists_before_first_routed_request() {
+        let upstream_a_model_calls = Arc::new(AtomicUsize::new(0));
+        let upstream_b_model_calls = Arc::new(AtomicUsize::new(0));
+        let upstream_b_seen_model = Arc::new(Mutex::new(None));
+        let upstream_a = Router::new().route(
+            "/models",
+            get({
+                let upstream_a_model_calls = upstream_a_model_calls.clone();
+                move || {
+                    let upstream_a_model_calls = upstream_a_model_calls.clone();
+                    async move {
+                        upstream_a_model_calls.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({
+                            "object": "list",
+                            "data": [{"id": "model-a", "object": "model"}]
+                        }))
+                    }
+                }
+            }),
+        );
+        let upstream_b = Router::new()
+            .route(
+                "/models",
+                get({
+                    let upstream_b_model_calls = upstream_b_model_calls.clone();
+                    move || {
+                        let upstream_b_model_calls = upstream_b_model_calls.clone();
+                        async move {
+                            upstream_b_model_calls.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({
+                                "object": "list",
+                                "data": [{"id": "model-b", "object": "model"}]
+                            }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post({
+                    let upstream_b_seen_model = upstream_b_seen_model.clone();
+                    move |Json(body): Json<serde_json::Value>| {
+                        let upstream_b_seen_model = upstream_b_seen_model.clone();
+                        async move {
+                            *upstream_b_seen_model.lock().await = body
+                                .get("model")
+                                .and_then(|model| model.as_str())
+                                .map(str::to_string);
+                            Json(json!({
+                                "id": "chatcmpl_b",
+                                "model": "model-b",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "from b"},
+                                    "finish_reason": "stop"
+                                }]
+                            }))
+                        }
+                    }
+                }),
+            );
+        let state = test_multi_config(vec![
+            spawn_upstream(upstream_a).await,
+            spawn_upstream(upstream_b).await,
+        ]);
+
+        for _ in 0..20 {
+            if upstream_a_model_calls.load(Ordering::SeqCst) == 1
+                && upstream_b_model_calls.load(Ordering::SeqCst) == 1
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(upstream_a_model_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(upstream_b_model_calls.load(Ordering::SeqCst), 1);
+
+        let resp = chat_completions(State(state), chat_model_request("model-b")).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(upstream_a_model_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(upstream_b_model_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            upstream_b_seen_model.lock().await.as_deref(),
+            Some("model-b")
+        );
     }
 
     #[tokio::test]

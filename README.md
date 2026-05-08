@@ -67,12 +67,13 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
   - Aggregates `/v1/models` across all upstream providers.
   - Supports optional upstream names and displays models as `name:model`.
   - Automatically selects the upstream that lists the requested `model`.
+  - Plain model ids are forwarded unchanged.
   - Requests using `name:model` are routed to that upstream and forwarded as the raw upstream model id.
   - If the same model exists in multiple upstreams, the default strategy uses the first matching upstream in config order.
   - Supports optional `round_robin` load balancing for same-model upstream candidates.
   - Supports optional automatic failover to the next matching upstream after retryable upstream failures.
   - Optional health checks can skip unhealthy upstreams during routing.
-  - Caches upstream model lists briefly for request routing, reducing repeated `/models` probes.
+  - Prefetches model lists on startup in multi-upstream mode and caches them briefly for routing.
 
 - **Performance and connection reuse**
   - Builds one long-lived reqwest client per configured upstream.

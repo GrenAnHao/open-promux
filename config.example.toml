@@ -42,8 +42,8 @@ port = 8080
 # upstream failures (403, 429, or 5xx). Leave false to preserve strict
 # first-match behavior.
 # [routing]
-# load_balance = "round_robin"
-# automatic_failover = true
+# load_balance = "first"
+# automatic_failover = false
 
 # HEALTH CHECK SETTINGS
 # ===========================================
@@ -72,8 +72,8 @@ port = 8080
 # Requests using `name:model` are routed to the named upstream.
 # Before forwarding, OpenProxy strips the `name:` prefix and sends
 # the raw upstream model id.
-# Model lists are cached briefly for routing to avoid repeated
-# `/models` probes on every request.
+# Plain model ids are forwarded unchanged. In multi-upstream mode,
+# model lists are prefetched on startup and cached briefly for routing.
 
 # OPENAI-COMPATIBLE UPSTREAM
 # -------------------------------------------
