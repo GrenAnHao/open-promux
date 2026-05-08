@@ -1,6 +1,6 @@
 {
   "name": "@grenanhao/openproxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenProxy CLI: OpenAI Responses API to Chat Completions proxy with multi-upstream model routing.",
   "bin": {
     "openproxy": "bin/openproxy.js"

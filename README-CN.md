@@ -12,6 +12,9 @@ OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目
 | SSE 流式转换 | 将 Chat Completions SSE 转为 Responses API SSE 事件 | 保持流式输出、工具调用增量和完成事件兼容 |
 | 多上游模型路由 | 聚合 `/v1/models`，并根据请求 `model` 自动选择上游 | 一个 OpenAI 兼容入口管理多个模型提供方 |
 | 上游长连接复用 | 每个上游复用一个 reqwest client 和连接池 | 避免重复 TCP/TLS/代理建连开销 |
+| 负载均衡与故障转移 | 支持 first-match 或 round-robin 路由，并可开启自动故障转移 | 多个上游暴露同模型时提升可用性 |
+| RPM/TPM 与并发限流 | 支持可选全局和单上游请求、token、并发限制 | 默认不改变行为，同时保护上游不过载 |
+| 健康检查 | 定期检查上游 `/models`，并在路由时跳过不健康上游 | 避免流量继续打到不可用提供方 |
 | 工具调用适配 | 转换 tools、tool_choice 和流式工具调用参数 | 支持 agent/tool 工作流跨 API 格式运行 |
 | 重试与错误透传 | 对 403/429/5xx 自动重试，并保留上游错误 body | 提升稳定性，同时方便观察真实上游错误 |
 | OpenAI 兼容认证 | 默认发送 `Authorization: Bearer <api_key>` | 开箱兼容 OpenAI 风格上游，也支持自定义认证 header |

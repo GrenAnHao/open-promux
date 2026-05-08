@@ -14,6 +14,9 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
 | Streaming SSE conversion | Converts Chat Completions SSE into Responses API SSE events | Keeps streaming output, tool call deltas, and final completion events compatible |
 | Multi-upstream model routing | Aggregates `/v1/models` and routes requests by `model` | Use multiple providers behind one OpenAI-compatible endpoint |
 | Persistent upstream connections | Reuses one reqwest client and connection pool per upstream | Avoids repeated TCP/TLS/proxy connection setup |
+| Load balancing and failover | Supports first-match or round-robin routing with optional automatic failover | Improves availability when multiple upstreams expose the same model |
+| RPM/TPM and concurrency limits | Supports optional global and per-upstream request, token, and concurrency limits | Protects upstreams from overload without changing defaults |
+| Health checks | Periodically checks upstream `/models` and skips unhealthy upstreams | Keeps traffic away from unavailable providers |
 | Tool call adaptation | Converts tools, tool_choice, and streamed tool call arguments | Enables agent/tool workflows across different API formats |
 | Retry and error passthrough | Retries 403/429/5xx and preserves upstream error bodies | Improves reliability while keeping upstream failures observable |
 | OpenAI-compatible auth | Defaults to `Authorization: Bearer <api_key>` | Works out of the box with OpenAI-style providers and custom auth headers |
