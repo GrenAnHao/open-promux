@@ -5,10 +5,13 @@ use std::path::Path;
 pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
-    pub upstream: UpstreamConfig,
+    #[serde(default)]
+    pub upstream: Option<UpstreamConfig>,
+    #[serde(default)]
+    pub upstreams: Vec<UpstreamConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamConfig {
     pub url: String,
     #[serde(default)]
@@ -48,6 +51,14 @@ impl Config {
         toml::from_str(&content)
             .unwrap_or_else(|e| panic!("failed to parse config file {}: {e}", path.display()))
     }
+
+    pub fn configured_upstreams(&self) -> Vec<&UpstreamConfig> {
+        if self.upstreams.is_empty() {
+            self.upstream.iter().collect()
+        } else {
+            self.upstreams.iter().collect()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -65,7 +76,10 @@ api_key = "test-key"
         )
         .unwrap();
 
-        assert_eq!(config.upstream.auth_header, "Authorization");
+        assert_eq!(
+            config.upstream.as_ref().unwrap().auth_header,
+            "Authorization"
+        );
     }
 
     #[test]
@@ -80,6 +94,29 @@ auth_header = ""
         )
         .unwrap();
 
-        assert_eq!(config.upstream.auth_header, "Authorization");
+        assert_eq!(
+            config.upstream.as_ref().unwrap().auth_header,
+            "Authorization"
+        );
+    }
+
+    #[test]
+    fn config_should_parse_multiple_upstreams_without_legacy_upstream() {
+        let parsed = toml::from_str::<Config>(
+            r#"
+[[upstreams]]
+url = "http://upstream-a.example/v1"
+api_key = "key-a"
+
+[[upstreams]]
+url = "http://upstream-b.example/v1"
+api_key = "key-b"
+auth_header = "api-key"
+"#,
+        );
+
+        let config = parsed.unwrap();
+
+        assert_eq!(config.configured_upstreams().len(), 2);
     }
 }

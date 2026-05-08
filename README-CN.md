@@ -41,8 +41,15 @@ OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目
 
 - **模型列表代理**
   - 支持 `GET /v1/models`。
-  - 自动代理到上游 `{upstream.url}/models`。
+  - 单上游模式下自动代理到上游 `{upstream.url}/models`。
+  - 多上游模式下自动聚合所有上游的模型列表。
   - 同样支持认证、重试和错误 body 透传。
+
+- **多上游模型路由**
+  - 同时兼容旧版 `[upstream]` 和新版 `[[upstreams]]` 配置。
+  - `/v1/models` 会聚合所有上游模型列表。
+  - `/v1/responses` 和 `/v1/chat/completions` 会根据请求里的 `model` 自动匹配上游。
+  - 如果多个上游暴露同名模型，按配置顺序选择第一个匹配项。
 
 - **认证配置兼容**
   - `auth_header` 省略或为空时，默认使用 OpenAI 标准 `Authorization`。
@@ -110,6 +117,23 @@ auth_header = "api-key"
 ```http
 api-key: your-secret
 ```
+
+多上游自动路由示例：
+
+```toml
+port = 8080
+
+[[upstreams]]
+url = "https://api.openai.com/v1"
+api_key = "sk-your-api-key"
+
+[[upstreams]]
+url = "http://127.0.0.1:8000/v1"
+api_key = "your-secret"
+auth_header = "api-key"
+```
+
+使用上述配置时，`GET /v1/models` 会返回合并后的模型列表。请求 `/v1/responses` 或 `/v1/chat/completions` 时，会根据请求中的 `model` 自动选择包含该模型的上游。
 
 ### 3. 运行
 
@@ -188,7 +212,7 @@ curl http://127.0.0.1:8080/v1/responses \
 
 直通代理到上游 `{upstream.url}/chat/completions`。
 
-适合已经使用 Chat Completions 格式的客户端。
+适合已经使用 Chat Completions 格式的客户端。多上游模式下会读取请求中的 `model` 并路由到匹配上游。
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -203,7 +227,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 ### `GET /v1/models`
 
-代理上游模型列表。
+代理上游模型列表。多上游模式下会聚合所有已配置上游的模型列表。
 
 ```bash
 curl http://127.0.0.1:8080/v1/models
@@ -214,20 +238,24 @@ curl http://127.0.0.1:8080/v1/models
 | 字段 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `port` | 否 | `8080` | 本地监听端口 |
-| `upstream.url` | 是 | 无 | 上游 API 基础地址，通常以 `/v1` 结尾 |
+| `upstream.url` | 旧版单上游配置必填 | 无 | 上游 API 基础地址，通常以 `/v1` 结尾 |
 | `upstream.api_key` | 否 | 空字符串 | 上游认证密钥 |
 | `upstream.auth_header` | 否 | `Authorization` | 上游认证 header 名；为空时也使用 `Authorization` |
+| `upstreams[].url` | 多上游配置必填 | 无 | 单个上游的 API 基础地址 |
+| `upstreams[].api_key` | 否 | 空字符串 | 单个上游的认证密钥 |
+| `upstreams[].auth_header` | 否 | `Authorization` | 单个上游的认证 header 名 |
 
 ## 转换流程
 
 `/v1/responses` 的核心流程：
 
 1. 解析客户端 Responses API 请求。
-2. 将 `instructions`、`input`、`tools`、`tool_choice` 等字段转换为 Chat Completions 兼容格式。
-3. 请求上游 `{upstream.url}/chat/completions`。
-4. 非流式响应：解析 Chat Completions JSON，转换为 Responses API JSON。
-5. 流式响应：解析上游 SSE，逐事件转换为 Responses API SSE。
-6. 上游错误：按规则重试，最终仍失败时透传状态码和错误 body。
+2. 根据请求里的 `model` 查找暴露该模型的上游。
+3. 将 `instructions`、`input`、`tools`、`tool_choice` 等字段转换为 Chat Completions 兼容格式。
+4. 请求上游 `{upstream.url}/chat/completions`。
+5. 非流式响应：解析 Chat Completions JSON，转换为 Responses API JSON。
+6. 流式响应：解析上游 SSE，逐事件转换为 Responses API SSE。
+7. 上游错误：按规则重试，最终仍失败时透传状态码和错误 body。
 
 ## 开发命令
 
@@ -258,6 +286,8 @@ cargo test <test_name>
 - `[DONE]` 无 finish_reason 时兜底完成 output。
 - 403/429/5xx 重试。
 - `/v1/models` 代理与重试。
+- 多上游 `/v1/models` 聚合。
+- 根据请求模型自动路由到对应上游。
 - OpenAI 默认 `Authorization: Bearer <api_key>` 认证行为。
 
 ## 注意事项

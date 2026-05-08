@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::config::Config;
+use crate::config::{Config, UpstreamConfig};
 use crate::convert;
 use crate::types::*;
 
@@ -24,25 +24,18 @@ fn upstream_client() -> Client {
         .expect("failed to build upstream HTTP client")
 }
 
-fn apply_upstream_auth(builder: RequestBuilder, config: &Config) -> RequestBuilder {
-    if config.upstream.api_key.is_empty() {
+fn apply_upstream_auth(builder: RequestBuilder, upstream: &UpstreamConfig) -> RequestBuilder {
+    if upstream.api_key.is_empty() {
         builder
-    } else if config
-        .upstream
-        .auth_header
-        .eq_ignore_ascii_case("authorization")
-        && !config
-            .upstream
-            .api_key
-            .to_ascii_lowercase()
-            .starts_with("bearer ")
+    } else if upstream.auth_header.eq_ignore_ascii_case("authorization")
+        && !upstream.api_key.to_ascii_lowercase().starts_with("bearer ")
     {
         builder.header(
-            &config.upstream.auth_header,
-            format!("Bearer {}", config.upstream.api_key),
+            &upstream.auth_header,
+            format!("Bearer {}", upstream.api_key),
         )
     } else {
-        builder.header(&config.upstream.auth_header, &config.upstream.api_key)
+        builder.header(&upstream.auth_header, &upstream.api_key)
     }
 }
 
@@ -94,6 +87,83 @@ where
     unreachable!()
 }
 
+fn configured_upstreams(config: &Config) -> Vec<UpstreamConfig> {
+    config.configured_upstreams().into_iter().cloned().collect()
+}
+
+async fn fetch_model_items(
+    client: &Client,
+    upstream: &UpstreamConfig,
+    label: &str,
+) -> Result<Vec<serde_json::Value>, StatusCode> {
+    let upstream_url = upstream.url.trim_end_matches('/');
+    let target = format!("{upstream_url}/models");
+    let upstream_resp =
+        send_with_retries(label, || apply_upstream_auth(client.get(&target), upstream))
+            .await
+            .map_err(|e| {
+                tracing::error!("{label} upstream request failed: {e}");
+                StatusCode::BAD_GATEWAY
+            })?;
+    let status =
+        StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = upstream_resp.bytes().await.map_err(|e| {
+        tracing::error!("{label} failed to read upstream response: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    if status.is_client_error() || status.is_server_error() {
+        tracing::warn!(
+            "{label} upstream error: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        return Err(status);
+    }
+
+    let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+        tracing::error!("{label} failed to parse upstream models response: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(body
+        .get("data")
+        .and_then(|data| data.as_array())
+        .cloned()
+        .unwrap_or_default())
+}
+
+async fn select_upstream_for_model(
+    client: &Client,
+    upstreams: &[UpstreamConfig],
+    model: Option<&str>,
+) -> Option<UpstreamConfig> {
+    if upstreams.len() <= 1 || model.is_none() {
+        return upstreams.first().cloned();
+    }
+
+    let model = model.unwrap();
+    for upstream in upstreams {
+        match fetch_model_items(client, upstream, "[router]").await {
+            Ok(items)
+                if items
+                    .iter()
+                    .any(|item| item.get("id").and_then(|id| id.as_str()) == Some(model)) =>
+            {
+                return Some(upstream.clone());
+            }
+            Ok(_) => {}
+            Err(status) => {
+                tracing::warn!(
+                    "[router] failed to inspect upstream {} models: {status}",
+                    upstream.url
+                );
+            }
+        }
+    }
+
+    None
+}
+
 pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Body>) -> Response {
     let start = Instant::now();
     let (parts, body) = req.into_parts();
@@ -106,24 +176,38 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
         }
     };
 
-    let is_stream = {
-        let v: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
-        v.get("stream").and_then(|s| s.as_bool()).unwrap_or(false)
-    };
+    let request_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or_default();
+    let is_stream = request_json
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+    let model = request_json.get("model").and_then(|m| m.as_str());
 
     tracing::info!("[passthrough] POST /v1/chat/completions stream={is_stream}");
 
-    let upstream_url = config.upstream.url.trim_end_matches('/');
+    let client = upstream_client();
+    let upstreams = configured_upstreams(&config);
+    let upstream = match select_upstream_for_model(&client, &upstreams, model).await {
+        Some(upstream) => upstream,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                "model not found in configured upstreams",
+            )
+                .into_response();
+        }
+    };
+
+    let upstream_url = upstream.url.trim_end_matches('/');
     let target = format!("{upstream_url}/chat/completions");
     tracing::info!("[passthrough] -> upstream: {target}");
 
-    let client = upstream_client();
     let upstream_resp = match send_with_retries("[passthrough]", || {
         let mut builder = apply_upstream_auth(
             client
                 .post(&target)
                 .header("content-type", "application/json"),
-            &config,
+            &upstream,
         );
 
         for (key, value) in parts.headers.iter() {
@@ -234,17 +318,30 @@ pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) ->
         String::from_utf8_lossy(&chat_body)
     );
 
-    let upstream_url = config.upstream.url.trim_end_matches('/');
+    let client = upstream_client();
+    let upstreams = configured_upstreams(&config);
+    let upstream =
+        match select_upstream_for_model(&client, &upstreams, Some(&responses_req.model)).await {
+            Some(upstream) => upstream,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    "model not found in configured upstreams",
+                )
+                    .into_response();
+            }
+        };
+
+    let upstream_url = upstream.url.trim_end_matches('/');
     let target = format!("{upstream_url}/chat/completions");
     tracing::info!("[responses] -> upstream: {target}");
 
-    let client = upstream_client();
     let upstream_resp = match send_with_retries("[responses]", || {
         apply_upstream_auth(
             client
                 .post(&target)
                 .header("content-type", "application/json"),
-            &config,
+            &upstream,
         )
         .body(chat_body.clone())
     })
@@ -430,45 +527,75 @@ pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) ->
 }
 
 pub async fn models(State(config): State<Arc<Config>>) -> Response {
-    let upstream_url = config.upstream.url.trim_end_matches('/');
-    let target = format!("{upstream_url}/models");
-    tracing::info!("[models] GET /v1/models -> upstream: {target}");
-
     let client = upstream_client();
-    let upstream_resp = match send_with_retries("[models]", || {
-        apply_upstream_auth(client.get(&target), &config)
-    })
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("[models] upstream request failed: {e}");
-            return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
-        }
-    };
+    let upstreams = configured_upstreams(&config);
 
-    let status =
-        StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if upstreams.is_empty() {
+        return (StatusCode::BAD_GATEWAY, "no upstreams configured").into_response();
+    }
 
-    match upstream_resp.bytes().await {
-        Ok(bytes) => {
-            if status.is_client_error() || status.is_server_error() {
-                tracing::warn!(
-                    "[models] upstream error: {}",
-                    String::from_utf8_lossy(&bytes)
-                );
+    if upstreams.len() == 1 {
+        let upstream = &upstreams[0];
+        let upstream_url = upstream.url.trim_end_matches('/');
+        let target = format!("{upstream_url}/models");
+        tracing::info!("[models] GET /v1/models -> upstream: {target}");
+
+        let upstream_resp = match send_with_retries("[models]", || {
+            apply_upstream_auth(client.get(&target), upstream)
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("[models] upstream request failed: {e}");
+                return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
             }
-            let mut resp = Response::new(Body::from(bytes));
-            *resp.status_mut() = status;
-            resp.headers_mut()
-                .insert("content-type", "application/json".parse().unwrap());
-            resp
-        }
-        Err(e) => {
-            tracing::error!("[models] failed to read upstream response: {e}");
-            (StatusCode::BAD_GATEWAY, "failed to read upstream response").into_response()
+        };
+
+        let status = StatusCode::from_u16(upstream_resp.status().as_u16())
+            .unwrap_or(StatusCode::BAD_GATEWAY);
+
+        return match upstream_resp.bytes().await {
+            Ok(bytes) => {
+                if status.is_client_error() || status.is_server_error() {
+                    tracing::warn!(
+                        "[models] upstream error: {}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+                let mut resp = Response::new(Body::from(bytes));
+                *resp.status_mut() = status;
+                resp.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                resp
+            }
+            Err(e) => {
+                tracing::error!("[models] failed to read upstream response: {e}");
+                (StatusCode::BAD_GATEWAY, "failed to read upstream response").into_response()
+            }
+        };
+    }
+
+    let mut merged = Vec::new();
+    for upstream in &upstreams {
+        match fetch_model_items(&client, upstream, "[models]").await {
+            Ok(items) => merged.extend(items),
+            Err(status) => {
+                return (status, "failed to fetch upstream models").into_response();
+            }
         }
     }
+
+    let body = serde_json::json!({
+        "object": "list",
+        "data": merged
+    });
+
+    let mut resp = Response::new(Body::from(body.to_string()));
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    resp
 }
 
 #[cfg(test)]
@@ -497,11 +624,27 @@ mod tests {
     fn test_config(upstream_url: String) -> Arc<Config> {
         Arc::new(Config {
             port: 0,
-            upstream: crate::config::UpstreamConfig {
+            upstream: Some(crate::config::UpstreamConfig {
                 url: upstream_url,
                 api_key: String::new(),
                 auth_header: "Authorization".into(),
-            },
+            }),
+            upstreams: Vec::new(),
+        })
+    }
+
+    fn test_multi_config(upstream_urls: Vec<String>) -> Arc<Config> {
+        Arc::new(Config {
+            port: 0,
+            upstream: None,
+            upstreams: upstream_urls
+                .into_iter()
+                .map(|url| crate::config::UpstreamConfig {
+                    url,
+                    api_key: String::new(),
+                    auth_header: "Authorization".into(),
+                })
+                .collect(),
         })
     }
 
@@ -681,6 +824,137 @@ data: [DONE]
     }
 
     #[tokio::test]
+    async fn models_should_merge_model_lists_from_multiple_upstreams() {
+        let upstream_a = Router::new().route(
+            "/models",
+            get(|| async {
+                Json(json!({
+                    "object": "list",
+                    "data": [{"id": "model-a", "object": "model"}]
+                }))
+            }),
+        );
+        let upstream_b = Router::new().route(
+            "/models",
+            get(|| async {
+                Json(json!({
+                    "object": "list",
+                    "data": [{"id": "model-b", "object": "model"}]
+                }))
+            }),
+        );
+        let config = test_multi_config(vec![
+            spawn_upstream(upstream_a).await,
+            spawn_upstream(upstream_b).await,
+        ]);
+
+        let resp = models(State(config)).await;
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<_> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ids, vec!["model-a", "model-b"]);
+    }
+
+    #[tokio::test]
+    async fn responses_should_route_to_upstream_that_lists_requested_model() {
+        let upstream_a_called = Arc::new(AtomicUsize::new(0));
+        let upstream_b_called = Arc::new(AtomicUsize::new(0));
+        let upstream_a = Router::new()
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({
+                        "object": "list",
+                        "data": [{"id": "model-a", "object": "model"}]
+                    }))
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post({
+                    let upstream_a_called = upstream_a_called.clone();
+                    move || {
+                        let upstream_a_called = upstream_a_called.clone();
+                        async move {
+                            upstream_a_called.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"error": "wrong upstream"})).into_response()
+                        }
+                    }
+                }),
+            );
+        let upstream_b = Router::new()
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({
+                        "object": "list",
+                        "data": [{"id": "model-b", "object": "model"}]
+                    }))
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post({
+                    let upstream_b_called = upstream_b_called.clone();
+                    move || {
+                        let upstream_b_called = upstream_b_called.clone();
+                        async move {
+                            upstream_b_called.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({
+                                "id": "chatcmpl_b",
+                                "model": "model-b",
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "from b"},
+                                    "finish_reason": "stop"
+                                }]
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            );
+        let config = test_multi_config(vec![
+            spawn_upstream(upstream_a).await,
+            spawn_upstream(upstream_b).await,
+        ]);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "model-b",
+                    "input": "hello"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = responses(State(config), req).await;
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(upstream_a_called.load(Ordering::SeqCst), 0);
+        assert_eq!(upstream_b_called.load(Ordering::SeqCst), 1);
+        assert_eq!(body["output"][0]["content"][0]["text"], "from b");
+    }
+
+    #[tokio::test]
     async fn models_should_send_bearer_authorization_when_using_openai_auth_header() {
         let app = Router::new().route(
             "/models",
@@ -695,11 +969,12 @@ data: [DONE]
         );
         let config = Arc::new(Config {
             port: 0,
-            upstream: crate::config::UpstreamConfig {
+            upstream: Some(crate::config::UpstreamConfig {
                 url: spawn_upstream(app).await,
                 api_key: "test-key".into(),
                 auth_header: "Authorization".into(),
-            },
+            }),
+            upstreams: Vec::new(),
         });
 
         let resp = models(State(config)).await;
@@ -726,11 +1001,12 @@ data: [DONE]
         );
         let config = Arc::new(Config {
             port: 0,
-            upstream: crate::config::UpstreamConfig {
+            upstream: Some(crate::config::UpstreamConfig {
                 url: spawn_upstream(app).await,
                 api_key: "Bearer test-key".into(),
                 auth_header: "Authorization".into(),
-            },
+            }),
+            upstreams: Vec::new(),
         });
 
         let resp = models(State(config)).await;

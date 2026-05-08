@@ -43,8 +43,15 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
 
 - **Model list proxy**
   - Supports `GET /v1/models`.
-  - Proxies to upstream `{upstream.url}/models`.
+  - Proxies to upstream `{upstream.url}/models` for single-upstream setups.
+  - Merges model lists from all configured upstreams for multi-upstream setups.
   - Uses the same authentication, retry, and error body passthrough behavior.
+
+- **Multi-upstream model routing**
+  - Supports both legacy `[upstream]` and new `[[upstreams]]` configuration.
+  - Aggregates `/v1/models` across all upstream providers.
+  - Automatically selects the upstream that lists the requested `model`.
+  - If the same model exists in multiple upstreams, the first matching upstream in config order is used.
 
 - **Authentication compatibility**
   - If `auth_header` is omitted or empty, OpenAI's standard `Authorization` header is used.
@@ -112,6 +119,23 @@ This sends:
 ```http
 api-key: your-secret
 ```
+
+Multi-upstream routing:
+
+```toml
+port = 8080
+
+[[upstreams]]
+url = "https://api.openai.com/v1"
+api_key = "sk-your-api-key"
+
+[[upstreams]]
+url = "http://127.0.0.1:8000/v1"
+api_key = "your-secret"
+auth_header = "api-key"
+```
+
+With this configuration, `GET /v1/models` returns a merged model list. Requests to `/v1/responses` and `/v1/chat/completions` are routed to the upstream that advertises the requested `model`.
 
 ### 3. Run
 
@@ -190,7 +214,7 @@ Full context example:
 
 Directly proxies to upstream `{upstream.url}/chat/completions`.
 
-Use this route for clients that already send Chat Completions requests.
+Use this route for clients that already send Chat Completions requests. In multi-upstream mode, OpenProxy reads the request `model` and sends the request to the matching upstream.
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -205,7 +229,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 ### `GET /v1/models`
 
-Proxies the upstream model list.
+Proxies the upstream model list. In multi-upstream mode, model lists from all configured upstreams are merged.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models
@@ -216,20 +240,24 @@ curl http://127.0.0.1:8080/v1/models
 | Field | Required | Default | Description |
 | --- | --- | --- | --- |
 | `port` | No | `8080` | Local listen port |
-| `upstream.url` | Yes | None | Upstream API base URL, usually ending with `/v1` |
+| `upstream.url` | Yes for legacy single-upstream config | None | Upstream API base URL, usually ending with `/v1` |
 | `upstream.api_key` | No | Empty string | Upstream authentication key |
 | `upstream.auth_header` | No | `Authorization` | Upstream authentication header name; empty values also use `Authorization` |
+| `upstreams[].url` | Yes for multi-upstream config | None | Upstream API base URL for one provider |
+| `upstreams[].api_key` | No | Empty string | Authentication key for one provider |
+| `upstreams[].auth_header` | No | `Authorization` | Authentication header name for one provider |
 
 ## Conversion Flow
 
 For `/v1/responses`:
 
 1. Parse the incoming Responses API request.
-2. Convert `instructions`, `input`, `tools`, `tool_choice`, and other fields into a Chat Completions-compatible request.
-3. Send the converted request to upstream `{upstream.url}/chat/completions`.
-4. Non-streaming response: parse Chat Completions JSON and convert it into Responses API JSON.
-5. Streaming response: parse upstream SSE and emit Responses API SSE events.
-6. Upstream error: retry when applicable, then pass through the final status code and error body.
+2. Select the matching upstream by checking which configured upstream advertises the requested `model`.
+3. Convert `instructions`, `input`, `tools`, `tool_choice`, and other fields into a Chat Completions-compatible request.
+4. Send the converted request to upstream `{upstream.url}/chat/completions`.
+5. Non-streaming response: parse Chat Completions JSON and convert it into Responses API JSON.
+6. Streaming response: parse upstream SSE and emit Responses API SSE events.
+7. Upstream error: retry when applicable, then pass through the final status code and error body.
 
 ## Development Commands
 
@@ -260,6 +288,8 @@ The test suite covers the main contract behaviors:
 - Fallback output completion when `[DONE]` arrives without `finish_reason`.
 - Retry for 403/429/5xx.
 - `/v1/models` proxying and retry behavior.
+- Multi-upstream `/v1/models` aggregation.
+- Automatic upstream routing by requested model.
 - OpenAI default `Authorization: Bearer <api_key>` authentication behavior.
 
 ## Notes
