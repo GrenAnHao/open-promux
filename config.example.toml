@@ -1,0 +1,5 @@
+port = 8080
+
+[upstream]
+url = "https://api.openai.com/v1"
+api_key = "sk-your-api-key"
