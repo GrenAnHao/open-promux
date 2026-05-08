@@ -1,0 +1,34 @@
+{
+  "name": "@grenanhao/openproxy",
+  "version": "0.1.0",
+  "description": "OpenProxy CLI: OpenAI Responses API to Chat Completions proxy with multi-upstream model routing.",
+  "bin": {
+    "openproxy": "bin/openproxy.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "config.example.toml",
+    "README.md",
+    "README-CN.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GrenAnHao/openai-responses-proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GrenAnHao/openai-responses-proxy/issues"
+  },
+  "homepage": "https://github.com/GrenAnHao/openai-responses-proxy#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

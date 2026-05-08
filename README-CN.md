@@ -84,7 +84,27 @@ OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目
 
 ## 快速开始
 
-### 1. 编译
+### 1. 安装
+
+通过 npm 安装：
+
+```bash
+npm install -g @grenanhao/openproxy
+```
+
+运行已安装的 CLI：
+
+```bash
+openproxy ./config.toml
+```
+
+也可以从 GitHub Releases 下载原生二进制：
+
+```text
+https://github.com/GrenAnHao/openai-responses-proxy/releases
+```
+
+或者从源码编译：
 
 ```bash
 cargo build
@@ -150,7 +170,7 @@ auth_header = "api-key"
 
 使用上述配置时，`GET /v1/models` 会返回合并后的模型列表，并显示类似 `openai:gpt-4.1-mini` 或 `local:qwen3` 的模型 id。请求 `/v1/responses` 或 `/v1/chat/completions` 时可以直接使用这些显示出来的 id；OpenProxy 会路由到对应上游，并在转发前去掉 `name:` 前缀。
 
-### 3. 运行
+### 3. 从源码运行
 
 ```bash
 cargo run
@@ -167,6 +187,37 @@ cargo run -- ./config.toml
 ```text
 0.0.0.0:8080
 ```
+
+## 部署命令
+
+通过 npm 安装并运行：
+
+```bash
+npm install -g @grenanhao/openproxy
+openproxy ./config.toml
+```
+
+使用下载的 Release 二进制运行：
+
+```bash
+./openproxy ./config.toml
+```
+
+发布 GitHub Release：
+
+```bash
+git tag -a v0.1.0 -m "OpenProxy v0.1.0"
+git push origin v0.1.0
+```
+
+通过 GitHub Actions 发布 npm 包：
+
+```bash
+gh secret set NPM_TOKEN
+gh workflow run "Publish NPM" --ref master
+```
+
+`NPM_TOKEN` 必须是有权限发布 `@grenanhao/openproxy` 的 npm automation token。由于 GitHub Actions 创建 Release 时不会稳定触发另一个 release workflow，建议在 Release 成功后手动执行上面的 `gh workflow run` 命令发布 npm 包。
 
 ## 接口说明
 

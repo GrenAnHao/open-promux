@@ -86,7 +86,27 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
 
 ## Quick Start
 
-### 1. Build
+### 1. Install
+
+Install from npm:
+
+```bash
+npm install -g @grenanhao/openproxy
+```
+
+Run the installed CLI:
+
+```bash
+openproxy ./config.toml
+```
+
+You can also download native binaries from GitHub Releases:
+
+```text
+https://github.com/GrenAnHao/openai-responses-proxy/releases
+```
+
+Or build from source:
 
 ```bash
 cargo build
@@ -152,7 +172,7 @@ auth_header = "api-key"
 
 With this configuration, `GET /v1/models` returns a merged model list and displays ids such as `openai:gpt-4.1-mini` or `local:qwen3`. Requests to `/v1/responses` and `/v1/chat/completions` can use those displayed ids; OpenProxy routes to the named upstream and strips the `name:` prefix before forwarding.
 
-### 3. Run
+### 3. Run from source
 
 ```bash
 cargo run
@@ -169,6 +189,37 @@ By default, OpenProxy listens on:
 ```text
 0.0.0.0:8080
 ```
+
+## Deployment Commands
+
+Install and run with npm:
+
+```bash
+npm install -g @grenanhao/openproxy
+openproxy ./config.toml
+```
+
+Run with a downloaded release binary:
+
+```bash
+./openproxy ./config.toml
+```
+
+Publish a GitHub Release:
+
+```bash
+git tag -a v0.1.0 -m "OpenProxy v0.1.0"
+git push origin v0.1.0
+```
+
+Publish the npm package through GitHub Actions:
+
+```bash
+gh secret set NPM_TOKEN
+gh workflow run "Publish NPM"
+```
+
+`NPM_TOKEN` must be an npm automation token with permission to publish `@grenanhao/openproxy`.
 
 ## API Endpoints
 
