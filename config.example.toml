@@ -1,32 +1,58 @@
-# Local listen port. Optional, defaults to 8080 when omitted.
+# SERVER SETTINGS
+# ===========================================
+#
+# Local listen port (default: 8080)
+# OpenProxy listens on 0.0.0.0 using this port.
+# Change this when port 8080 is already used by another application.
 port = 8080
 
+# UPSTREAM PROVIDERS
+# ===========================================
+#
 # Configure one or more upstream providers.
-# Each upstream should expose OpenAI-compatible `/models` and `/chat/completions` endpoints under `url`.
+# Each upstream should expose OpenAI-compatible endpoints under `url`:
+#   - GET  {url}/models
+#   - POST {url}/chat/completions
+#
+# In multi-upstream mode, OpenProxy merges all upstream model lists.
+# If `name` is set, exposed model ids become `name:model`.
+# For example, upstream model `gpt-4.1-mini` with name `openai`
+# is exposed as `openai:gpt-4.1-mini`.
+#
+# Requests using `name:model` are routed to the named upstream.
+# Before forwarding, OpenProxy strips the `name:` prefix and sends
+# the raw upstream model id.
+
+# OPENAI-COMPATIBLE UPSTREAM
+# -------------------------------------------
 [[upstreams]]
 
-# Optional display/routing prefix.
-# When set, `/v1/models` will expose model ids as `name:model`.
-# Requests using `name:model` will be routed to this upstream and forwarded as the raw `model`.
+# Upstream display/routing name (optional)
+# When omitted, model ids are exposed without a prefix.
 name = "openai"
 
-# Required upstream API base URL, usually ending with `/v1`.
+# Upstream API base URL (required)
+# Usually ends with `/v1`.
 url = "https://api.openai.com/v1"
 
-# Optional upstream API key. Leave empty only when the upstream does not require authentication.
+# Upstream API key (optional)
+# Leave empty only when the upstream does not require authentication.
 api_key = "sk-your-api-key"
 
-# Optional authentication header name.
-# Defaults to `Authorization` when omitted or empty.
-# For `Authorization`, OpenProxy automatically sends `Bearer <api_key>` unless api_key already starts with `Bearer `.
+# Authentication header name (optional, default: Authorization)
+# When using Authorization, OpenProxy automatically sends
+# `Authorization: Bearer <api_key>` unless api_key already starts with `Bearer `.
 # auth_header = "Authorization"
 
+# CUSTOM OR LOCAL UPSTREAM
+# -------------------------------------------
 [[upstreams]]
 
-# Use a different name to distinguish models from this provider, for example `local:qwen3`.
+# Use a different name to distinguish models from this provider.
+# For example, model `qwen3` is exposed as `local:qwen3`.
 name = "local"
 
-# Local or custom OpenAI-compatible upstream.
+# Local or custom OpenAI-compatible upstream URL.
 url = "http://127.0.0.1:8000/v1"
 
 # API key for this upstream.
