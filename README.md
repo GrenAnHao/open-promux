@@ -6,6 +6,17 @@ OpenProxy is a Rust/Axum API conversion proxy. It lets clients that speak the Op
 
 The project converts `/v1/responses` requests to upstream `/chat/completions` requests, keeps a direct `/v1/chat/completions` passthrough route, and also proxies `/v1/models`.
 
+## Hot Features
+
+| Feature | What it does | Why it matters |
+| --- | --- | --- |
+| Responses API bridge | Converts `/v1/responses` to upstream Chat Completions | Use Responses-compatible clients with Chat Completions-only providers |
+| Streaming SSE conversion | Converts Chat Completions SSE into Responses API SSE events | Keeps streaming output, tool call deltas, and final completion events compatible |
+| Multi-upstream model routing | Aggregates `/v1/models` and routes requests by `model` | Use multiple providers behind one OpenAI-compatible endpoint |
+| Tool call adaptation | Converts tools, tool_choice, and streamed tool call arguments | Enables agent/tool workflows across different API formats |
+| Retry and error passthrough | Retries 403/429/5xx and preserves upstream error bodies | Improves reliability while keeping upstream failures observable |
+| OpenAI-compatible auth | Defaults to `Authorization: Bearer <api_key>` | Works out of the box with OpenAI-style providers and custom auth headers |
+
 ## Features
 
 - **Responses API to Chat Completions**
