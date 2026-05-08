@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: openproxy-x86_64-unknown-linux-gnu.tar.gz
+            exe: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: openproxy-x86_64-pc-windows-msvc.zip
+            exe: ".exe"
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: openproxy-x86_64-apple-darwin.tar.gz
+            exe: ""
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: openproxy-aarch64-apple-darwin.tar.gz
+            exe: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package release artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/openproxy${{ matrix.exe }}" "package/openproxy${{ matrix.exe }}"
+          Copy-Item "config.example.toml" "package/config.example.toml"
+          Copy-Item "README.md" "package/README.md"
+          Copy-Item "README-CN.md" "package/README-CN.md"
+
+          if ("${{ runner.os }}" -eq "Windows") {
+            Compress-Archive -Path "package/*" -DestinationPath "${{ matrix.archive }}" -Force
+          } else {
+            tar -czf "${{ matrix.archive }}" -C package .
+          }
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" artifacts/* --clobber
+          else
+            gh release create "$TAG_NAME" artifacts/* --title "OpenProxy $TAG_NAME" --generate-notes
+          fi
