@@ -1,13 +1,14 @@
 # OpenProxy
 
-OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目标是让只支持 OpenAI Chat Completions 格式的上游服务，也能被兼容 OpenAI Responses API 的客户端调用。
+OpenProxy 是一个面向 Codex App 用户的 Rust/Axum API 格式转换代理。它对 Codex App 暴露 OpenAI Responses API 兼容接口，同时把请求转发到 MIMO、DeepSeek V4 等 OpenAI-compatible Chat Completions 上游服务。
 
-项目提供 `/v1/responses` 到上游 `/chat/completions` 的完整转换，同时保留 `/v1/chat/completions` 直通代理，并支持 `/v1/models` 模型列表代理。
+它解决的核心痛点是：很多模型服务已经提供 OpenAI 兼容的 `/chat/completions` 接口，但无法直接接入 Codex App。OpenProxy 会把 Codex App 的 `/v1/responses` 请求转换为上游 `/chat/completions` 请求，同时保留 `/v1/chat/completions` 直通代理，并支持 `/v1/models` 模型列表代理。
 
 ## 热点功能速览
 
 | 功能 | 实现内容 | 价值 |
 | --- | --- | --- |
+| Codex App 兼容 | 将 Codex App 的 `/v1/responses` 流量转换到 OpenAI-compatible Chat Completions 上游 | 让 MIMO、DeepSeek V4 等无法直接接入 Codex App 的模型可无缝使用 |
 | Responses API 桥接 | 将 `/v1/responses` 转换为上游 Chat Completions | 让 Responses API 客户端直接使用只支持 Chat Completions 的上游 |
 | SSE 流式转换 | 将 Chat Completions SSE 转为 Responses API SSE 事件 | 保持流式输出、工具调用增量和完成事件兼容 |
 | 多上游模型路由 | 聚合 `/v1/models`，并根据请求 `model` 自动选择上游 | 一个 OpenAI 兼容入口管理多个模型提供方 |
@@ -18,6 +19,24 @@ OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目
 | 工具调用适配 | 转换 tools、tool_choice 和流式工具调用参数 | 支持 agent/tool 工作流跨 API 格式运行 |
 | 重试与错误透传 | 对 403/429/5xx 自动重试，并保留上游错误 body | 提升稳定性，同时方便观察真实上游错误 |
 | OpenAI 兼容认证 | 默认发送 `Authorization: Bearer <api_key>` | 开箱兼容 OpenAI 风格上游，也支持自定义认证 header |
+
+## 典型场景：Codex App + OpenAI 兼容模型服务
+
+很多模型服务提供的是 OpenAI-compatible Chat Completions API，但 Codex App 需要 Responses API 协议。OpenProxy 可以作为中间转换层：
+
+```text
+Codex App -> OpenProxy /v1/responses -> MIMO / DeepSeek V4 / 其他 /chat/completions 上游
+```
+
+这样可以继续使用 Codex App，同时把实际模型后端切换到原本无法直接对接 Codex App 的模型服务。
+
+在 Codex App 中，将 OpenAI-compatible base URL 指向 OpenProxy：
+
+```text
+http://127.0.0.1:8080/v1
+```
+
+然后选择 OpenProxy `/v1/models` 返回的模型 ID，例如普通上游模型名，或 `deepseek:deepseek-v4` 这类带路由前缀的模型名。
 
 ## 功能特性
 

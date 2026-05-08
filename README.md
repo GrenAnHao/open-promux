@@ -2,14 +2,15 @@
 
 [中文文档](./README-CN.md)
 
-OpenProxy is a Rust/Axum API conversion proxy. It lets clients that speak the OpenAI Responses API call upstream providers that only support the OpenAI Chat Completions format.
+OpenProxy is a Rust/Axum API conversion proxy for Codex App users. It exposes an OpenAI Responses API-compatible endpoint for Codex App while forwarding requests to upstream providers such as MIMO, DeepSeek V4, and other OpenAI-compatible Chat Completions services.
 
-The project converts `/v1/responses` requests to upstream `/chat/completions` requests, keeps a direct `/v1/chat/completions` passthrough route, and also proxies `/v1/models`.
+The project solves the common pain point where a model provider exposes an OpenAI-compatible `/chat/completions` API but cannot be connected to Codex App directly. OpenProxy converts Codex App's `/v1/responses` traffic to upstream `/chat/completions`, keeps a direct `/v1/chat/completions` passthrough route, and also proxies `/v1/models`.
 
 ## Hot Features
 
 | Feature | What it does | Why it matters |
 | --- | --- | --- |
+| Codex App compatibility | Converts Codex App `/v1/responses` traffic to OpenAI-compatible upstream Chat Completions | Use MIMO, DeepSeek V4, and similar providers that cannot connect to Codex App directly |
 | Responses API bridge | Converts `/v1/responses` to upstream Chat Completions | Use Responses-compatible clients with Chat Completions-only providers |
 | Streaming SSE conversion | Converts Chat Completions SSE into Responses API SSE events | Keeps streaming output, tool call deltas, and final completion events compatible |
 | Multi-upstream model routing | Aggregates `/v1/models` and routes requests by `model` | Use multiple providers behind one OpenAI-compatible endpoint |
@@ -20,6 +21,24 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
 | Tool call adaptation | Converts tools, tool_choice, and streamed tool call arguments | Enables agent/tool workflows across different API formats |
 | Retry and error passthrough | Retries 403/429/5xx and preserves upstream error bodies | Improves reliability while keeping upstream failures observable |
 | OpenAI-compatible auth | Defaults to `Authorization: Bearer <api_key>` | Works out of the box with OpenAI-style providers and custom auth headers |
+
+## Typical Use Case: Codex App + OpenAI-Compatible Providers
+
+Many model providers expose an OpenAI-compatible Chat Completions API, but Codex App expects the Responses API protocol. OpenProxy sits between Codex App and those providers:
+
+```text
+Codex App -> OpenProxy /v1/responses -> MIMO / DeepSeek V4 / other /chat/completions providers
+```
+
+This lets you keep using Codex App while switching the actual model backend to providers that are not natively compatible with Codex App.
+
+Point Codex App's OpenAI-compatible base URL to OpenProxy:
+
+```text
+http://127.0.0.1:8080/v1
+```
+
+Then select a model id returned by OpenProxy's `/v1/models`, such as a plain upstream model id or a routed id like `deepseek:deepseek-v4`.
 
 ## Features
 
