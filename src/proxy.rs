@@ -91,6 +91,25 @@ fn configured_upstreams(config: &Config) -> Vec<UpstreamConfig> {
     config.configured_upstreams().into_iter().cloned().collect()
 }
 
+struct UpstreamSelection {
+    upstream: UpstreamConfig,
+    upstream_model: Option<String>,
+}
+
+fn prefix_model_item_id(item: &mut serde_json::Value, name: &str) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    let Some(id) = obj.get("id").and_then(|id| id.as_str()).map(str::to_string) else {
+        return;
+    };
+
+    obj.insert(
+        "id".into(),
+        serde_json::Value::String(format!("{name}:{id}")),
+    );
+}
+
 async fn fetch_model_items(
     client: &Client,
     upstream: &UpstreamConfig,
@@ -136,12 +155,55 @@ async fn select_upstream_for_model(
     client: &Client,
     upstreams: &[UpstreamConfig],
     model: Option<&str>,
-) -> Option<UpstreamConfig> {
+) -> Option<UpstreamSelection> {
     if upstreams.len() <= 1 || model.is_none() {
-        return upstreams.first().cloned();
+        return upstreams.first().cloned().map(|upstream| {
+            let upstream_model = model.map(|model| {
+                upstream
+                    .name
+                    .as_ref()
+                    .and_then(|name| model.strip_prefix(&format!("{name}:")))
+                    .unwrap_or(model)
+                    .to_string()
+            });
+            UpstreamSelection {
+                upstream,
+                upstream_model,
+            }
+        });
     }
 
     let model = model.unwrap();
+    if let Some((upstream_name, upstream_model)) = model.split_once(':') {
+        for upstream in upstreams {
+            if upstream.name.as_deref() != Some(upstream_name) {
+                continue;
+            }
+
+            match fetch_model_items(client, upstream, "[router]").await {
+                Ok(items)
+                    if items.iter().any(|item| {
+                        item.get("id").and_then(|id| id.as_str()) == Some(upstream_model)
+                    }) =>
+                {
+                    return Some(UpstreamSelection {
+                        upstream: upstream.clone(),
+                        upstream_model: Some(upstream_model.to_string()),
+                    });
+                }
+                Ok(_) => {}
+                Err(status) => {
+                    tracing::warn!(
+                        "[router] failed to inspect upstream {} models: {status}",
+                        upstream.url
+                    );
+                }
+            }
+        }
+
+        return None;
+    }
+
     for upstream in upstreams {
         match fetch_model_items(client, upstream, "[router]").await {
             Ok(items)
@@ -149,7 +211,10 @@ async fn select_upstream_for_model(
                     .iter()
                     .any(|item| item.get("id").and_then(|id| id.as_str()) == Some(model)) =>
             {
-                return Some(upstream.clone());
+                return Some(UpstreamSelection {
+                    upstream: upstream.clone(),
+                    upstream_model: Some(model.to_string()),
+                });
             }
             Ok(_) => {}
             Err(status) => {
@@ -187,8 +252,8 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
 
     let client = upstream_client();
     let upstreams = configured_upstreams(&config);
-    let upstream = match select_upstream_for_model(&client, &upstreams, model).await {
-        Some(upstream) => upstream,
+    let selection = match select_upstream_for_model(&client, &upstreams, model).await {
+        Some(selection) => selection,
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -197,10 +262,23 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
                 .into_response();
         }
     };
+    let upstream = selection.upstream;
 
     let upstream_url = upstream.url.trim_end_matches('/');
     let target = format!("{upstream_url}/chat/completions");
     tracing::info!("[passthrough] -> upstream: {target}");
+    let upstream_body = if let Some(upstream_model) = selection.upstream_model.as_ref() {
+        let mut upstream_json = request_json.clone();
+        if let Some(obj) = upstream_json.as_object_mut() {
+            obj.insert(
+                "model".into(),
+                serde_json::Value::String(upstream_model.clone()),
+            );
+        }
+        serde_json::to_vec(&upstream_json).unwrap_or_else(|_| body_bytes.to_vec())
+    } else {
+        body_bytes.to_vec()
+    };
 
     let upstream_resp = match send_with_retries("[passthrough]", || {
         let mut builder = apply_upstream_auth(
@@ -219,7 +297,7 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
             }
         }
 
-        builder.body(body_bytes.clone())
+        builder.body(upstream_body.clone())
     })
     .await
     {
@@ -320,9 +398,9 @@ pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) ->
 
     let client = upstream_client();
     let upstreams = configured_upstreams(&config);
-    let upstream =
+    let selection =
         match select_upstream_for_model(&client, &upstreams, Some(&responses_req.model)).await {
-            Some(upstream) => upstream,
+            Some(selection) => selection,
             None => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -331,6 +409,20 @@ pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) ->
                     .into_response();
             }
         };
+    let upstream = selection.upstream;
+    let upstream_model = selection
+        .upstream_model
+        .clone()
+        .unwrap_or_else(|| responses_req.model.clone());
+    let chat_body = if upstream_model != chat_req.model {
+        let mut chat_json = serde_json::to_value(&chat_req).unwrap_or_default();
+        if let Some(obj) = chat_json.as_object_mut() {
+            obj.insert("model".into(), serde_json::Value::String(upstream_model));
+        }
+        serde_json::to_vec(&chat_json).unwrap_or_else(|_| chat_body.clone())
+    } else {
+        chat_body
+    };
 
     let upstream_url = upstream.url.trim_end_matches('/');
     let target = format!("{upstream_url}/chat/completions");
@@ -563,6 +655,23 @@ pub async fn models(State(config): State<Arc<Config>>) -> Response {
                         String::from_utf8_lossy(&bytes)
                     );
                 }
+                let bytes = if let Some(name) = upstream.name.as_ref() {
+                    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        Ok(mut body) => {
+                            if let Some(items) =
+                                body.get_mut("data").and_then(|data| data.as_array_mut())
+                            {
+                                for item in items {
+                                    prefix_model_item_id(item, name);
+                                }
+                            }
+                            serde_json::to_vec(&body).unwrap_or_else(|_| bytes.to_vec())
+                        }
+                        Err(_) => bytes.to_vec(),
+                    }
+                } else {
+                    bytes.to_vec()
+                };
                 let mut resp = Response::new(Body::from(bytes));
                 *resp.status_mut() = status;
                 resp.headers_mut()
@@ -579,7 +688,14 @@ pub async fn models(State(config): State<Arc<Config>>) -> Response {
     let mut merged = Vec::new();
     for upstream in &upstreams {
         match fetch_model_items(&client, upstream, "[models]").await {
-            Ok(items) => merged.extend(items),
+            Ok(items) => {
+                for mut item in items {
+                    if let Some(name) = upstream.name.as_ref() {
+                        prefix_model_item_id(&mut item, name);
+                    }
+                    merged.push(item);
+                }
+            }
             Err(status) => {
                 return (status, "failed to fetch upstream models").into_response();
             }
@@ -625,6 +741,7 @@ mod tests {
         Arc::new(Config {
             port: 0,
             upstream: Some(crate::config::UpstreamConfig {
+                name: None,
                 url: upstream_url,
                 api_key: String::new(),
                 auth_header: "Authorization".into(),
@@ -640,6 +757,7 @@ mod tests {
             upstreams: upstream_urls
                 .into_iter()
                 .map(|url| crate::config::UpstreamConfig {
+                    name: None,
                     url,
                     api_key: String::new(),
                     auth_header: "Authorization".into(),
@@ -866,6 +984,158 @@ data: [DONE]
     }
 
     #[tokio::test]
+    async fn models_should_prefix_model_ids_with_upstream_names_when_configured() {
+        let upstream_a = Router::new().route(
+            "/models",
+            get(|| async {
+                Json(json!({
+                    "object": "list",
+                    "data": [{"id": "shared-model", "object": "model"}]
+                }))
+            }),
+        );
+        let upstream_b = Router::new().route(
+            "/models",
+            get(|| async {
+                Json(json!({
+                    "object": "list",
+                    "data": [{"id": "shared-model", "object": "model"}]
+                }))
+            }),
+        );
+        let config: Config = toml::from_str(&format!(
+            r#"
+[[upstreams]]
+name = "openai"
+url = "{}"
+
+[[upstreams]]
+name = "local"
+url = "{}"
+"#,
+            spawn_upstream(upstream_a).await,
+            spawn_upstream(upstream_b).await
+        ))
+        .unwrap();
+
+        let resp = models(State(Arc::new(config))).await;
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<_> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ids, vec!["openai:shared-model", "local:shared-model"]);
+    }
+
+    #[tokio::test]
+    async fn responses_should_route_prefixed_model_and_strip_prefix_before_upstream() {
+        let upstream_a_called = Arc::new(AtomicUsize::new(0));
+        let upstream_b_called = Arc::new(AtomicUsize::new(0));
+        let upstream_a = Router::new()
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({
+                        "object": "list",
+                        "data": [{"id": "shared-model", "object": "model"}]
+                    }))
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post({
+                    let upstream_a_called = upstream_a_called.clone();
+                    move || {
+                        let upstream_a_called = upstream_a_called.clone();
+                        async move {
+                            upstream_a_called.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"error": "wrong upstream"})).into_response()
+                        }
+                    }
+                }),
+            );
+        let upstream_b = Router::new()
+            .route(
+                "/models",
+                get(|| async {
+                    Json(json!({
+                        "object": "list",
+                        "data": [{"id": "shared-model", "object": "model"}]
+                    }))
+                }),
+            )
+            .route(
+                "/chat/completions",
+                post({
+                    let upstream_b_called = upstream_b_called.clone();
+                    move |Json(body): Json<serde_json::Value>| {
+                        let upstream_b_called = upstream_b_called.clone();
+                        async move {
+                            upstream_b_called.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({
+                                "id": "chatcmpl_b",
+                                "model": body["model"],
+                                "choices": [{
+                                    "index": 0,
+                                    "message": {"role": "assistant", "content": "from local"},
+                                    "finish_reason": "stop"
+                                }]
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            );
+        let config: Config = toml::from_str(&format!(
+            r#"
+[[upstreams]]
+name = "openai"
+url = "{}"
+
+[[upstreams]]
+name = "local"
+url = "{}"
+"#,
+            spawn_upstream(upstream_a).await,
+            spawn_upstream(upstream_b).await
+        ))
+        .unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "local:shared-model",
+                    "input": "hello"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = responses(State(Arc::new(config)), req).await;
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(upstream_a_called.load(Ordering::SeqCst), 0);
+        assert_eq!(upstream_b_called.load(Ordering::SeqCst), 1);
+        assert_eq!(body["model"], "shared-model");
+        assert_eq!(body["output"][0]["content"][0]["text"], "from local");
+    }
+
+    #[tokio::test]
     async fn responses_should_route_to_upstream_that_lists_requested_model() {
         let upstream_a_called = Arc::new(AtomicUsize::new(0));
         let upstream_b_called = Arc::new(AtomicUsize::new(0));
@@ -970,6 +1240,7 @@ data: [DONE]
         let config = Arc::new(Config {
             port: 0,
             upstream: Some(crate::config::UpstreamConfig {
+                name: None,
                 url: spawn_upstream(app).await,
                 api_key: "test-key".into(),
                 auth_header: "Authorization".into(),
@@ -1002,6 +1273,7 @@ data: [DONE]
         let config = Arc::new(Config {
             port: 0,
             upstream: Some(crate::config::UpstreamConfig {
+                name: None,
                 url: spawn_upstream(app).await,
                 api_key: "Bearer test-key".into(),
                 auth_header: "Authorization".into(),

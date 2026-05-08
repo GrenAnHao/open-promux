@@ -13,6 +13,8 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamConfig {
+    #[serde(default)]
+    pub name: Option<String>,
     pub url: String,
     #[serde(default)]
     pub api_key: String,
@@ -105,10 +107,12 @@ auth_header = ""
         let parsed = toml::from_str::<Config>(
             r#"
 [[upstreams]]
+name = "upstream-a"
 url = "http://upstream-a.example/v1"
 api_key = "key-a"
 
 [[upstreams]]
+name = "upstream-b"
 url = "http://upstream-b.example/v1"
 api_key = "key-b"
 auth_header = "api-key"
@@ -118,5 +122,6 @@ auth_header = "api-key"
         let config = parsed.unwrap();
 
         assert_eq!(config.configured_upstreams().len(), 2);
+        assert_eq!(config.upstreams[0].name.as_deref(), Some("upstream-a"));
     }
 }

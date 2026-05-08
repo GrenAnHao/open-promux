@@ -61,7 +61,9 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
 - **Multi-upstream model routing**
   - Supports both legacy `[upstream]` and new `[[upstreams]]` configuration.
   - Aggregates `/v1/models` across all upstream providers.
+  - Supports optional upstream names and displays models as `name:model`.
   - Automatically selects the upstream that lists the requested `model`.
+  - Requests using `name:model` are routed to that upstream and forwarded as the raw upstream model id.
   - If the same model exists in multiple upstreams, the first matching upstream in config order is used.
 
 - **Authentication compatibility**
@@ -137,16 +139,18 @@ Multi-upstream routing:
 port = 8080
 
 [[upstreams]]
+name = "openai"
 url = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 
 [[upstreams]]
+name = "local"
 url = "http://127.0.0.1:8000/v1"
 api_key = "your-secret"
 auth_header = "api-key"
 ```
 
-With this configuration, `GET /v1/models` returns a merged model list. Requests to `/v1/responses` and `/v1/chat/completions` are routed to the upstream that advertises the requested `model`.
+With this configuration, `GET /v1/models` returns a merged model list and displays ids such as `openai:gpt-4.1-mini` or `local:qwen3`. Requests to `/v1/responses` and `/v1/chat/completions` can use those displayed ids; OpenProxy routes to the named upstream and strips the `name:` prefix before forwarding.
 
 ### 3. Run
 
@@ -254,6 +258,7 @@ curl http://127.0.0.1:8080/v1/models
 | `upstream.url` | Yes for legacy single-upstream config | None | Upstream API base URL, usually ending with `/v1` |
 | `upstream.api_key` | No | Empty string | Upstream authentication key |
 | `upstream.auth_header` | No | `Authorization` | Upstream authentication header name; empty values also use `Authorization` |
+| `upstreams[].name` | No | None | Display/routing prefix for models, producing ids like `name:model` |
 | `upstreams[].url` | Yes for multi-upstream config | None | Upstream API base URL for one provider |
 | `upstreams[].api_key` | No | Empty string | Authentication key for one provider |
 | `upstreams[].auth_header` | No | `Authorization` | Authentication header name for one provider |

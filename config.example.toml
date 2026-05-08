@@ -1,10 +1,12 @@
 port = 8080
 
 [[upstreams]]
+name = "openai"
 url = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 
 [[upstreams]]
+name = "local"
 url = "http://127.0.0.1:8000/v1"
 api_key = "your-secret"
 auth_header = "api-key"

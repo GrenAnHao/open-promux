@@ -59,7 +59,9 @@ OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目
 - **多上游模型路由**
   - 同时兼容旧版 `[upstream]` 和新版 `[[upstreams]]` 配置。
   - `/v1/models` 会聚合所有上游模型列表。
+  - 支持给上游设置 `name`，模型列表显示为 `name:model`。
   - `/v1/responses` 和 `/v1/chat/completions` 会根据请求里的 `model` 自动匹配上游。
+  - 请求使用 `name:model` 时会路由到该上游，并在转发前还原为上游原始模型名。
   - 如果多个上游暴露同名模型，按配置顺序选择第一个匹配项。
 
 - **认证配置兼容**
@@ -135,16 +137,18 @@ api-key: your-secret
 port = 8080
 
 [[upstreams]]
+name = "openai"
 url = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 
 [[upstreams]]
+name = "local"
 url = "http://127.0.0.1:8000/v1"
 api_key = "your-secret"
 auth_header = "api-key"
 ```
 
-使用上述配置时，`GET /v1/models` 会返回合并后的模型列表。请求 `/v1/responses` 或 `/v1/chat/completions` 时，会根据请求中的 `model` 自动选择包含该模型的上游。
+使用上述配置时，`GET /v1/models` 会返回合并后的模型列表，并显示类似 `openai:gpt-4.1-mini` 或 `local:qwen3` 的模型 id。请求 `/v1/responses` 或 `/v1/chat/completions` 时可以直接使用这些显示出来的 id；OpenProxy 会路由到对应上游，并在转发前去掉 `name:` 前缀。
 
 ### 3. 运行
 
@@ -252,6 +256,7 @@ curl http://127.0.0.1:8080/v1/models
 | `upstream.url` | 旧版单上游配置必填 | 无 | 上游 API 基础地址，通常以 `/v1` 结尾 |
 | `upstream.api_key` | 否 | 空字符串 | 上游认证密钥 |
 | `upstream.auth_header` | 否 | `Authorization` | 上游认证 header 名；为空时也使用 `Authorization` |
+| `upstreams[].name` | 否 | 无 | 模型显示和路由前缀，会生成类似 `name:model` 的模型 id |
 | `upstreams[].url` | 多上游配置必填 | 无 | 单个上游的 API 基础地址 |
 | `upstreams[].api_key` | 否 | 空字符串 | 单个上游的认证密钥 |
 | `upstreams[].auth_header` | 否 | `Authorization` | 单个上游的认证 header 名 |
