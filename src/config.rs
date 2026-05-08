@@ -6,6 +6,8 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default)]
+    pub auth_key: Option<String>,
+    #[serde(default)]
     pub upstream: Option<UpstreamConfig>,
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
@@ -123,5 +125,21 @@ auth_header = "api-key"
 
         assert_eq!(config.configured_upstreams().len(), 2);
         assert_eq!(config.upstreams[0].name.as_deref(), Some("upstream-a"));
+    }
+
+    #[test]
+    fn config_should_parse_proxy_auth_key() {
+        let config: Config = toml::from_str(
+            r#"
+port = 8080
+auth_key = "proxy-secret"
+
+[upstream]
+url = "http://example.com/v1"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.auth_key.as_deref(), Some("proxy-secret"));
     }
 }

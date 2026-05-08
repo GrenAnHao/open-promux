@@ -6,6 +6,16 @@
 # Change this when port 8080 is already used by another application.
 port = 8080
 
+# Proxy authentication key (optional)
+# When set, clients must send `Authorization: Bearer <auth_key>`
+# to OpenProxy for all proxy endpoints:
+#   - GET  /v1/models
+#   - POST /v1/responses
+#   - POST /v1/chat/completions
+#
+# Leave this commented out to disable proxy-side authentication.
+# auth_key = "change-me"
+
 # UPSTREAM PROVIDERS
 # ===========================================
 #

@@ -122,6 +122,7 @@ OpenAI 风格上游示例：
 
 ```toml
 port = 8080
+auth_key = "proxy-secret"
 
 [upstream]
 url = "https://api.openai.com/v1"
@@ -133,6 +134,14 @@ api_key = "sk-your-api-key"
 ```http
 Authorization: Bearer sk-your-api-key
 ```
+
+`auth_key` 用于保护 OpenProxy 代理端本身。设置后，客户端请求 `/v1/models`、`/v1/responses` 或 `/v1/chat/completions` 时必须携带：
+
+```http
+Authorization: Bearer proxy-secret
+```
+
+不设置 `auth_key` 时不会启用代理端鉴权。
 
 自定义认证 header 示例：
 

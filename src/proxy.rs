@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures::StreamExt;
@@ -15,7 +15,7 @@ use crate::config::{Config, UpstreamConfig};
 use crate::convert;
 use crate::types::*;
 
-const MAX_RETRY_ATTEMPTS: usize = 3;
+const MAX_RETRIES: usize = 3;
 
 fn upstream_client() -> Client {
     Client::builder()
@@ -39,6 +39,21 @@ fn apply_upstream_auth(builder: RequestBuilder, upstream: &UpstreamConfig) -> Re
     }
 }
 
+fn is_proxy_authorized(config: &Config, headers: &HeaderMap) -> bool {
+    let Some(auth_key) = config.auth_key.as_deref().filter(|key| !key.is_empty()) else {
+        return true;
+    };
+    let expected = format!("Bearer {auth_key}");
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected)
+}
+
+fn unauthorized_response() -> Response {
+    (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+}
+
 fn should_retry_status(status: StatusCode) -> bool {
     status == StatusCode::FORBIDDEN
         || status == StatusCode::TOO_MANY_REQUESTS
@@ -49,36 +64,68 @@ async fn retry_delay(attempt: usize) {
     tokio::time::sleep(Duration::from_millis((attempt as u64) * 250)).await;
 }
 
+fn upstream_log_name(upstream: &UpstreamConfig) -> &str {
+    upstream.name.as_deref().unwrap_or("<unnamed>")
+}
+
+fn log_upstream_target(label: &str, upstream: &UpstreamConfig, target: &str) {
+    if let Some(name) = upstream.name.as_deref() {
+        tracing::info!("{label} -> upstream {name}: {target}");
+    } else {
+        tracing::info!("{label} -> upstream: {target}");
+    }
+}
+
 async fn send_with_retries<F>(
     label: &str,
+    upstream: &UpstreamConfig,
     mut build: F,
 ) -> Result<reqwest::Response, reqwest::Error>
 where
     F: FnMut() -> RequestBuilder,
 {
-    for attempt in 1..=MAX_RETRY_ATTEMPTS {
-        tracing::info!("{label} upstream request attempt {attempt}/{MAX_RETRY_ATTEMPTS}");
+    for failed_attempts in 0..=MAX_RETRIES {
+        let upstream_name = upstream_log_name(upstream);
+        if failed_attempts == 0 {
+            tracing::info!("{label} upstream {upstream_name} sending request");
+        } else {
+            tracing::info!(
+                "{label} upstream {upstream_name} retry attempt {failed_attempts}/{MAX_RETRIES}"
+            );
+        }
 
         match build().send().await {
             Ok(resp) => {
                 let status =
                     StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
-                if should_retry_status(status) && attempt < MAX_RETRY_ATTEMPTS {
-                    tracing::warn!(
-                        "{label} upstream request attempt {attempt}/{MAX_RETRY_ATTEMPTS} returned retryable status {status}; retrying"
-                    );
-                    retry_delay(attempt).await;
+                if should_retry_status(status) && failed_attempts < MAX_RETRIES {
+                    if failed_attempts == 0 {
+                        tracing::warn!(
+                            "{label} upstream {upstream_name} request returned retryable status {status}; retrying"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "{label} upstream {upstream_name} retry attempt {failed_attempts}/{MAX_RETRIES} returned retryable status {status}; retrying"
+                        );
+                    }
+                    retry_delay(failed_attempts + 1).await;
                     continue;
                 }
 
                 return Ok(resp);
             }
-            Err(e) if attempt < MAX_RETRY_ATTEMPTS => {
-                tracing::warn!(
-                    "{label} upstream request attempt {attempt}/{MAX_RETRY_ATTEMPTS} failed: {e}; retrying"
-                );
-                retry_delay(attempt).await;
+            Err(e) if failed_attempts < MAX_RETRIES => {
+                if failed_attempts == 0 {
+                    tracing::warn!(
+                        "{label} upstream {upstream_name} request failed: {e}; retrying"
+                    );
+                } else {
+                    tracing::warn!(
+                        "{label} upstream {upstream_name} retry attempt {failed_attempts}/{MAX_RETRIES} failed: {e}; retrying"
+                    );
+                }
+                retry_delay(failed_attempts + 1).await;
             }
             Err(e) => return Err(e),
         }
@@ -117,13 +164,14 @@ async fn fetch_model_items(
 ) -> Result<Vec<serde_json::Value>, StatusCode> {
     let upstream_url = upstream.url.trim_end_matches('/');
     let target = format!("{upstream_url}/models");
-    let upstream_resp =
-        send_with_retries(label, || apply_upstream_auth(client.get(&target), upstream))
-            .await
-            .map_err(|e| {
-                tracing::error!("{label} upstream request failed: {e}");
-                StatusCode::BAD_GATEWAY
-            })?;
+    let upstream_resp = send_with_retries(label, upstream, || {
+        apply_upstream_auth(client.get(&target), upstream)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!("{label} upstream request failed: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
     let status =
         StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let bytes = upstream_resp.bytes().await.map_err(|e| {
@@ -233,6 +281,10 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
     let start = Instant::now();
     let (parts, body) = req.into_parts();
 
+    if !is_proxy_authorized(config.as_ref(), &parts.headers) {
+        return unauthorized_response();
+    }
+
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,
         Err(e) => {
@@ -266,7 +318,7 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
 
     let upstream_url = upstream.url.trim_end_matches('/');
     let target = format!("{upstream_url}/chat/completions");
-    tracing::info!("[passthrough] -> upstream: {target}");
+    log_upstream_target("[passthrough]", &upstream, &target);
     let upstream_body = if let Some(upstream_model) = selection.upstream_model.as_ref() {
         let mut upstream_json = request_json.clone();
         if let Some(obj) = upstream_json.as_object_mut() {
@@ -280,7 +332,7 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
         body_bytes.to_vec()
     };
 
-    let upstream_resp = match send_with_retries("[passthrough]", || {
+    let upstream_resp = match send_with_retries("[passthrough]", &upstream, || {
         let mut builder = apply_upstream_auth(
             client
                 .post(&target)
@@ -357,7 +409,11 @@ pub async fn chat_completions(State(config): State<Arc<Config>>, req: Request<Bo
 
 pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) -> Response {
     let start = Instant::now();
-    let (_parts, body) = req.into_parts();
+    let (parts, body) = req.into_parts();
+
+    if !is_proxy_authorized(config.as_ref(), &parts.headers) {
+        return unauthorized_response();
+    }
 
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
         Ok(b) => b,
@@ -391,11 +447,6 @@ pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) ->
         }
     };
 
-    tracing::info!(
-        "[responses] converted to ChatCompletions: {}",
-        String::from_utf8_lossy(&chat_body)
-    );
-
     let client = upstream_client();
     let upstreams = configured_upstreams(&config);
     let selection =
@@ -426,9 +477,9 @@ pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) ->
 
     let upstream_url = upstream.url.trim_end_matches('/');
     let target = format!("{upstream_url}/chat/completions");
-    tracing::info!("[responses] -> upstream: {target}");
+    log_upstream_target("[responses]", &upstream, &target);
 
-    let upstream_resp = match send_with_retries("[responses]", || {
+    let upstream_resp = match send_with_retries("[responses]", &upstream, || {
         apply_upstream_auth(
             client
                 .post(&target)
@@ -618,7 +669,11 @@ pub async fn responses(State(config): State<Arc<Config>>, req: Request<Body>) ->
         .unwrap()
 }
 
-pub async fn models(State(config): State<Arc<Config>>) -> Response {
+pub async fn models(State(config): State<Arc<Config>>, headers: HeaderMap) -> Response {
+    if !is_proxy_authorized(config.as_ref(), &headers) {
+        return unauthorized_response();
+    }
+
     let client = upstream_client();
     let upstreams = configured_upstreams(&config);
 
@@ -630,9 +685,9 @@ pub async fn models(State(config): State<Arc<Config>>) -> Response {
         let upstream = &upstreams[0];
         let upstream_url = upstream.url.trim_end_matches('/');
         let target = format!("{upstream_url}/models");
-        tracing::info!("[models] GET /v1/models -> upstream: {target}");
+        log_upstream_target("[models] GET /v1/models", upstream, &target);
 
-        let upstream_resp = match send_with_retries("[models]", || {
+        let upstream_resp = match send_with_retries("[models]", upstream, || {
             apply_upstream_auth(client.get(&target), upstream)
         })
         .await
@@ -740,6 +795,7 @@ mod tests {
     fn test_config(upstream_url: String) -> Arc<Config> {
         Arc::new(Config {
             port: 0,
+            auth_key: None,
             upstream: Some(crate::config::UpstreamConfig {
                 name: None,
                 url: upstream_url,
@@ -753,6 +809,7 @@ mod tests {
     fn test_multi_config(upstream_urls: Vec<String>) -> Arc<Config> {
         Arc::new(Config {
             port: 0,
+            auth_key: None,
             upstream: None,
             upstreams: upstream_urls
                 .into_iter()
@@ -763,6 +820,20 @@ mod tests {
                     auth_header: "Authorization".into(),
                 })
                 .collect(),
+        })
+    }
+
+    fn test_auth_config(upstream_url: String) -> Arc<Config> {
+        Arc::new(Config {
+            port: 0,
+            auth_key: Some("proxy-secret".into()),
+            upstream: Some(crate::config::UpstreamConfig {
+                name: None,
+                url: upstream_url,
+                api_key: String::new(),
+                auth_header: "Authorization".into(),
+            }),
+            upstreams: Vec::new(),
         })
     }
 
@@ -780,6 +851,132 @@ mod tests {
                 .to_string(),
             ))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn responses_should_reject_request_when_proxy_auth_key_is_missing() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/chat/completions",
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({})).into_response()
+                    }
+                }
+            }),
+        );
+        let config = test_auth_config(spawn_upstream(app).await);
+
+        let resp = responses(State(config), responses_request(false)).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn responses_should_accept_request_when_proxy_auth_key_matches() {
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                Json(json!({
+                    "id": "chatcmpl_1",
+                    "model": "test-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2
+                    }
+                }))
+            }),
+        );
+        let config = test_auth_config(spawn_upstream(app).await);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer proxy-secret")
+            .body(Body::from(
+                json!({
+                    "model": "test-model",
+                    "stream": false,
+                    "input": "hello"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = responses(State(config), req).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_completions_should_reject_request_when_proxy_auth_key_is_missing() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/chat/completions",
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({})).into_response()
+                    }
+                }
+            }),
+        );
+        let config = test_auth_config(spawn_upstream(app).await);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = chat_completions(State(config), req).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn models_should_reject_request_when_proxy_auth_key_is_missing() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/models",
+            get({
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({})).into_response()
+                    }
+                }
+            }),
+        );
+        let config = test_auth_config(spawn_upstream(app).await);
+
+        let resp = models(State(config), HeaderMap::new()).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -825,6 +1022,51 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn responses_should_make_initial_request_then_retry_three_times() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/chat/completions",
+            post({
+                let attempts = attempts.clone();
+                move || {
+                    let attempts = attempts.clone();
+                    async move {
+                        if attempts.fetch_add(1, Ordering::SeqCst) < 3 {
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(json!({"error": "temporary failure"})),
+                            )
+                                .into_response();
+                        }
+
+                        Json(json!({
+                            "id": "chatcmpl_1",
+                            "model": "test-model",
+                            "choices": [{
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "ok"},
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let config = test_config(spawn_upstream(app).await);
+
+        let resp = responses(State(config), responses_request(false)).await;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
@@ -930,7 +1172,7 @@ data: [DONE]
         );
         let config = test_config(spawn_upstream(app).await);
 
-        let resp = models(State(config)).await;
+        let resp = models(State(config), HeaderMap::new()).await;
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -966,7 +1208,7 @@ data: [DONE]
             spawn_upstream(upstream_b).await,
         ]);
 
-        let resp = models(State(config)).await;
+        let resp = models(State(config), HeaderMap::new()).await;
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1018,7 +1260,7 @@ url = "{}"
         ))
         .unwrap();
 
-        let resp = models(State(Arc::new(config))).await;
+        let resp = models(State(Arc::new(config)), HeaderMap::new()).await;
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -1239,6 +1481,7 @@ url = "{}"
         );
         let config = Arc::new(Config {
             port: 0,
+            auth_key: None,
             upstream: Some(crate::config::UpstreamConfig {
                 name: None,
                 url: spawn_upstream(app).await,
@@ -1248,7 +1491,7 @@ url = "{}"
             upstreams: Vec::new(),
         });
 
-        let resp = models(State(config)).await;
+        let resp = models(State(config), HeaderMap::new()).await;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -1272,6 +1515,7 @@ url = "{}"
         );
         let config = Arc::new(Config {
             port: 0,
+            auth_key: None,
             upstream: Some(crate::config::UpstreamConfig {
                 name: None,
                 url: spawn_upstream(app).await,
@@ -1281,7 +1525,7 @@ url = "{}"
             upstreams: Vec::new(),
         });
 
-        let resp = models(State(config)).await;
+        let resp = models(State(config), HeaderMap::new()).await;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -1291,8 +1535,8 @@ url = "{}"
     }
 
     #[tokio::test]
-    async fn models_should_retry_retryable_status_three_times_and_return_final_upstream_error_body()
-    {
+    async fn models_should_make_initial_request_then_retry_three_times_and_return_final_upstream_error_body()
+     {
         let attempts = Arc::new(AtomicUsize::new(0));
         let app = Router::new().route(
             "/models",
@@ -1313,14 +1557,14 @@ url = "{}"
         );
         let config = test_config(spawn_upstream(app).await);
 
-        let resp = models(State(config)).await;
+        let resp = models(State(config), HeaderMap::new()).await;
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
             json!({"error": "upstream failed"})

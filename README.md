@@ -124,6 +124,7 @@ OpenAI-style upstream:
 
 ```toml
 port = 8080
+auth_key = "proxy-secret"
 
 [upstream]
 url = "https://api.openai.com/v1"
@@ -135,6 +136,14 @@ This automatically sends:
 ```http
 Authorization: Bearer sk-your-api-key
 ```
+
+`auth_key` protects OpenProxy itself. When it is set, clients must include this header when calling `/v1/models`, `/v1/responses`, or `/v1/chat/completions`:
+
+```http
+Authorization: Bearer proxy-secret
+```
+
+Leave `auth_key` unset to disable proxy-side authentication.
 
 Custom authentication header:
 
