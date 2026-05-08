@@ -1,12 +1,36 @@
+# Local listen port. Optional, defaults to 8080 when omitted.
 port = 8080
 
+# Configure one or more upstream providers.
+# Each upstream should expose OpenAI-compatible `/models` and `/chat/completions` endpoints under `url`.
 [[upstreams]]
+
+# Optional display/routing prefix.
+# When set, `/v1/models` will expose model ids as `name:model`.
+# Requests using `name:model` will be routed to this upstream and forwarded as the raw `model`.
 name = "openai"
+
+# Required upstream API base URL, usually ending with `/v1`.
 url = "https://api.openai.com/v1"
+
+# Optional upstream API key. Leave empty only when the upstream does not require authentication.
 api_key = "sk-your-api-key"
 
+# Optional authentication header name.
+# Defaults to `Authorization` when omitted or empty.
+# For `Authorization`, OpenProxy automatically sends `Bearer <api_key>` unless api_key already starts with `Bearer `.
+# auth_header = "Authorization"
+
 [[upstreams]]
+
+# Use a different name to distinguish models from this provider, for example `local:qwen3`.
 name = "local"
+
+# Local or custom OpenAI-compatible upstream.
 url = "http://127.0.0.1:8000/v1"
+
+# API key for this upstream.
 api_key = "your-secret"
+
+# Example for providers that expect a custom header instead of Authorization.
 auth_header = "api-key"
