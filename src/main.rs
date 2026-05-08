@@ -24,15 +24,16 @@ async fn main() {
         .into();
 
     tracing::info!("loading config from {}", config_path.display());
-    let config = Arc::new(config::Config::load(&config_path));
+    let config = config::Config::load(&config_path);
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let state = Arc::new(proxy::AppState::new(config));
 
     let app = Router::new()
         .route("/v1/models", get(proxy::models))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/responses", post(proxy::responses))
-        .with_state(config.clone());
+        .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     tracing::info!("openproxy listening on {addr}");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

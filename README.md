@@ -13,6 +13,7 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
 | Responses API bridge | Converts `/v1/responses` to upstream Chat Completions | Use Responses-compatible clients with Chat Completions-only providers |
 | Streaming SSE conversion | Converts Chat Completions SSE into Responses API SSE events | Keeps streaming output, tool call deltas, and final completion events compatible |
 | Multi-upstream model routing | Aggregates `/v1/models` and routes requests by `model` | Use multiple providers behind one OpenAI-compatible endpoint |
+| Persistent upstream connections | Reuses one reqwest client and connection pool per upstream | Avoids repeated TCP/TLS/proxy connection setup |
 | Tool call adaptation | Converts tools, tool_choice, and streamed tool call arguments | Enables agent/tool workflows across different API formats |
 | Retry and error passthrough | Retries 403/429/5xx and preserves upstream error bodies | Improves reliability while keeping upstream failures observable |
 | OpenAI-compatible auth | Defaults to `Authorization: Bearer <api_key>` | Works out of the box with OpenAI-style providers and custom auth headers |
@@ -64,7 +65,19 @@ The project converts `/v1/responses` requests to upstream `/chat/completions` re
   - Supports optional upstream names and displays models as `name:model`.
   - Automatically selects the upstream that lists the requested `model`.
   - Requests using `name:model` are routed to that upstream and forwarded as the raw upstream model id.
-  - If the same model exists in multiple upstreams, the first matching upstream in config order is used.
+  - If the same model exists in multiple upstreams, the default strategy uses the first matching upstream in config order.
+  - Supports optional `round_robin` load balancing for same-model upstream candidates.
+  - Supports optional automatic failover to the next matching upstream after retryable upstream failures.
+  - Optional health checks can skip unhealthy upstreams during routing.
+  - Caches upstream model lists briefly for request routing, reducing repeated `/models` probes.
+
+- **Performance and connection reuse**
+  - Builds one long-lived reqwest client per configured upstream.
+  - Reuses idle TCP/TLS/proxy connections through reqwest's connection pool.
+  - Allows HTTP/2 negotiation and multiplexing when the upstream supports it.
+  - Uses Tokio's multi-thread async runtime instead of creating one thread per request.
+  - Supports optional per-upstream concurrency limiting through `[performance].upstream_max_concurrent_requests`.
+  - Supports optional global and per-upstream RPM/TPM limits. Unset or `0` means disabled.
 
 - **Authentication compatibility**
   - If `auth_header` is omitted or empty, OpenAI's standard `Authorization` header is used.
@@ -180,6 +193,26 @@ auth_header = "api-key"
 ```
 
 With this configuration, `GET /v1/models` returns a merged model list and displays ids such as `openai:gpt-4.1-mini` or `local:qwen3`. Requests to `/v1/responses` and `/v1/chat/completions` can use those displayed ids; OpenProxy routes to the named upstream and strips the `name:` prefix before forwarding.
+
+Optional routing, health, and performance settings:
+
+```toml
+[performance]
+upstream_max_concurrent_requests = 64
+global_rpm = 600
+global_tpm = 120000
+
+[routing]
+load_balance = "round_robin"
+automatic_failover = true
+
+[health]
+enabled = true
+interval_millis = 30000
+unhealthy_after_failures = 3
+```
+
+When set, concurrency limits hold one slot per upstream request; streaming responses hold the slot until the stream finishes. RPM/TPM limits use a fixed 60-second window. Leave limits unset or set them to `0` to disable them.
 
 ### 3. Run from source
 

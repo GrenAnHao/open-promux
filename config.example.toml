@@ -16,6 +16,46 @@ port = 8080
 # Leave this commented out to disable proxy-side authentication.
 # auth_key = "change-me"
 
+# PERFORMANCE SETTINGS
+# ===========================================
+#
+# OpenProxy creates one long-lived HTTP client per upstream.
+# This reuses TCP/TLS/proxy connections and allows HTTP/2 multiplexing
+# when the upstream supports it.
+#
+# Optional per-upstream concurrency limit.
+# Streaming responses hold one slot until the stream finishes.
+# Leave unset or set to 0 to disable this limit.
+# [performance]
+# upstream_max_concurrent_requests = 64
+# global_rpm = 600
+# global_tpm = 120000
+
+# ROUTING SETTINGS
+# ===========================================
+#
+# load_balance:
+#   - "first"       : use the first matching upstream (default)
+#   - "round_robin" : rotate between matching upstreams for the same model
+#
+# automatic_failover retries the next matching upstream after retryable
+# upstream failures (403, 429, or 5xx). Leave false to preserve strict
+# first-match behavior.
+# [routing]
+# load_balance = "round_robin"
+# automatic_failover = true
+
+# HEALTH CHECK SETTINGS
+# ===========================================
+#
+# Disabled by default. When enabled, OpenProxy periodically calls
+# `{upstream.url}/models`. Failed checks mark an upstream unhealthy after
+# `unhealthy_after_failures`; unhealthy upstreams are skipped by routing.
+# [health]
+# enabled = true
+# interval_millis = 30000
+# unhealthy_after_failures = 3
+
 # UPSTREAM PROVIDERS
 # ===========================================
 #
@@ -32,6 +72,8 @@ port = 8080
 # Requests using `name:model` are routed to the named upstream.
 # Before forwarding, OpenProxy strips the `name:` prefix and sends
 # the raw upstream model id.
+# Model lists are cached briefly for routing to avoid repeated
+# `/models` probes on every request.
 
 # OPENAI-COMPATIBLE UPSTREAM
 # -------------------------------------------
@@ -54,6 +96,18 @@ api_key = "sk-your-api-key"
 # `Authorization: Bearer <api_key>` unless api_key already starts with `Bearer `.
 # auth_header = "Authorization"
 
+# Per-upstream proxy (optional)
+# Format: host:port or host:port:username:password
+# proxy = "127.0.0.1:7890"
+# proxy_type = "http"
+#
+# Optional per-upstream overrides.
+# max_concurrent_requests overrides [performance].upstream_max_concurrent_requests.
+# rpm and tpm are fixed 60-second window request/token limits.
+# max_concurrent_requests = 32
+# rpm = 300
+# tpm = 60000
+
 # CUSTOM OR LOCAL UPSTREAM
 # -------------------------------------------
 [[upstreams]]
@@ -70,3 +124,6 @@ api_key = "your-secret"
 
 # Example for providers that expect a custom header instead of Authorization.
 auth_header = "api-key"
+
+# proxy = "127.0.0.1:1080:user:pass"
+# proxy_type = "socket"

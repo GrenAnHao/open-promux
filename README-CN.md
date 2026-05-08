@@ -11,6 +11,7 @@ OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目
 | Responses API 桥接 | 将 `/v1/responses` 转换为上游 Chat Completions | 让 Responses API 客户端直接使用只支持 Chat Completions 的上游 |
 | SSE 流式转换 | 将 Chat Completions SSE 转为 Responses API SSE 事件 | 保持流式输出、工具调用增量和完成事件兼容 |
 | 多上游模型路由 | 聚合 `/v1/models`，并根据请求 `model` 自动选择上游 | 一个 OpenAI 兼容入口管理多个模型提供方 |
+| 上游长连接复用 | 每个上游复用一个 reqwest client 和连接池 | 避免重复 TCP/TLS/代理建连开销 |
 | 工具调用适配 | 转换 tools、tool_choice 和流式工具调用参数 | 支持 agent/tool 工作流跨 API 格式运行 |
 | 重试与错误透传 | 对 403/429/5xx 自动重试，并保留上游错误 body | 提升稳定性，同时方便观察真实上游错误 |
 | OpenAI 兼容认证 | 默认发送 `Authorization: Bearer <api_key>` | 开箱兼容 OpenAI 风格上游，也支持自定义认证 header |
@@ -62,7 +63,19 @@ OpenProxy 是一个使用 Rust/Axum 编写的 API 格式转换代理，核心目
   - 支持给上游设置 `name`，模型列表显示为 `name:model`。
   - `/v1/responses` 和 `/v1/chat/completions` 会根据请求里的 `model` 自动匹配上游。
   - 请求使用 `name:model` 时会路由到该上游，并在转发前还原为上游原始模型名。
-  - 如果多个上游暴露同名模型，按配置顺序选择第一个匹配项。
+  - 如果多个上游暴露同名模型，默认按配置顺序选择第一个匹配项。
+  - 支持可选 `round_robin` 负载均衡，在同模型候选上游之间轮转。
+  - 支持可选自动故障转移，在可重试上游失败后切换到下一个匹配上游。
+  - 支持可选健康检查，路由时跳过不健康上游。
+  - 会短时间缓存上游模型列表，减少每次请求路由时重复访问 `/models`。
+
+- **性能与连接复用**
+  - 每个配置的上游会创建一个长生命周期 reqwest client。
+  - 通过 reqwest 连接池复用空闲 TCP/TLS/代理连接。
+  - 上游支持时可自动协商 HTTP/2 并使用多路复用。
+  - 使用 Tokio 多线程异步运行时，不为每个请求手动创建线程。
+  - 支持通过 `[performance].upstream_max_concurrent_requests` 配置每上游并发上限。
+  - 支持可选全局和单上游 RPM/TPM 限流。省略或设置为 `0` 表示关闭。
 
 - **认证配置兼容**
   - `auth_header` 省略或为空时，默认使用 OpenAI 标准 `Authorization`。
@@ -178,6 +191,26 @@ auth_header = "api-key"
 ```
 
 使用上述配置时，`GET /v1/models` 会返回合并后的模型列表，并显示类似 `openai:gpt-4.1-mini` 或 `local:qwen3` 的模型 id。请求 `/v1/responses` 或 `/v1/chat/completions` 时可以直接使用这些显示出来的 id；OpenProxy 会路由到对应上游，并在转发前去掉 `name:` 前缀。
+
+可选路由、健康检查和性能设置：
+
+```toml
+[performance]
+upstream_max_concurrent_requests = 64
+global_rpm = 600
+global_tpm = 120000
+
+[routing]
+load_balance = "round_robin"
+automatic_failover = true
+
+[health]
+enabled = true
+interval_millis = 30000
+unhealthy_after_failures = 3
+```
+
+设置后，并发限制会按上游请求占用槽位；流式响应会一直占用槽位直到流结束。RPM/TPM 使用固定 60 秒窗口。省略限流配置或设置为 `0` 表示关闭。
 
 ### 3. 从源码运行
 
