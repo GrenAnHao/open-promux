@@ -90,9 +90,14 @@ port = 8080
 #   - GET  {url}/models
 #   - POST {url}/chat/completions
 #
-# Set `api_format = "anthropic_messages"` for Anthropic Messages upstreams.
-# In that mode, /v1/responses is converted and forwarded to:
-#   - POST {url}/messages
+# Three upstream protocols are supported via `api_format`:
+#   - "chat_completions"   (default)  POST {url}/chat/completions
+#   - "anthropic_messages"            POST {url}/messages
+#   - "responses"                     POST {url}/responses (passthrough)
+#
+# /v1/responses, /v1/messages, and /v1/chat/completions all route to the
+# matching upstream and translate the body when needed. The full matrix
+# is documented in README.md ("无极上下游矩阵").
 #
 # In multi-upstream mode, open-promux merges all upstream model lists.
 # If `name` is set, exposed model ids become `name:model`.
@@ -154,6 +159,21 @@ auth_header = "x-api-key"
 
 # Convert OpenAI Responses API requests to Anthropic Messages API.
 api_format = "anthropic_messages"
+
+# OPENAI RESPONSES API UPSTREAM
+# -------------------------------------------
+# Use this when the upstream itself speaks the Responses API
+# (e.g. another open-promux instance, the OpenAI Responses preview,
+# or any custom Responses-API gateway).
+#
+# /v1/responses → byte-for-byte passthrough.
+# /v1/messages  → Anthropic ⇄ Responses translation (non-streaming today).
+# /v1/chat/completions → not yet supported (use /v1/responses).
+# [[upstreams]]
+# name = "responses-mirror"
+# url = "https://example.com/v1"
+# api_key = "your-key"
+# api_format = "responses"
 
 # CUSTOM OR LOCAL UPSTREAM
 # -------------------------------------------

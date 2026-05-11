@@ -154,6 +154,11 @@ pub enum UpstreamApiFormat {
     #[default]
     ChatCompletions,
     AnthropicMessages,
+    /// OpenAI Responses API: upstream accepts `/responses` payloads and
+    /// emits Responses-shaped JSON (or SSE events). Use this when the
+    /// upstream is itself a Responses-API speaker (e.g. another open-promux
+    /// instance, the OpenAI Responses preview, or a custom gateway).
+    Responses,
 }
 
 impl UpstreamProxyType {
@@ -276,8 +281,9 @@ impl<'de> Deserialize<'de> for UpstreamApiFormat {
             "anthropic_messages" | "anthropic-messages" | "anthropic" | "messages" => {
                 Ok(Self::AnthropicMessages)
             }
+            "responses" | "openai_responses" | "openai-responses" => Ok(Self::Responses),
             _ => Err(de::Error::custom(
-                "api_format must be chat_completions or anthropic_messages",
+                "api_format must be chat_completions, anthropic_messages, or responses",
             )),
         }
     }
@@ -291,6 +297,7 @@ impl Serialize for UpstreamApiFormat {
         let value = match self {
             Self::ChatCompletions => "chat_completions",
             Self::AnthropicMessages => "anthropic_messages",
+            Self::Responses => "responses",
         };
         serializer.serialize_str(value)
     }

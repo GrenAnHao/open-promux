@@ -2762,6 +2762,173 @@ async fn messages_should_translate_anthropic_request_to_chat_completions_upstrea
     assert_eq!(seen["messages"][0]["content"], "Hello");
 }
 
+// ── Responses upstream (api_format = "responses") ──
+
+fn responses_upstream_config(upstream_url: String) -> Arc<AppState> {
+    test_app_state(Config {
+        port: 0,
+        auth_key: None,
+        performance: crate::config::PerformanceConfig::default(),
+        routing: crate::config::RoutingConfig::default(),
+        health: crate::config::HealthConfig::default(),
+        rectifier: crate::config::RectifierConfig::default(),
+        upstream: Some(crate::config::UpstreamConfig {
+            name: None,
+            url: upstream_url,
+            api_key: String::new(),
+            auth_header: "Authorization".into(),
+            proxy: None,
+            proxy_type: crate::config::UpstreamProxyType::Http,
+            api_format: crate::config::UpstreamApiFormat::Responses,
+            max_concurrent_requests: None,
+            rpm: None,
+            tpm: None,
+        }),
+        upstreams: Vec::new(),
+    })
+}
+
+#[tokio::test]
+async fn responses_should_passthrough_to_responses_upstream() {
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
+    let app = Router::new().route(
+        "/responses",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                Json(json!({
+                    "id": "resp_123",
+                    "object": "response",
+                    "created_at": 1_700_000_000_u64,
+                    "model": "test-model",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_1",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Hello", "annotations": []}]
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                }))
+            }
+        }),
+    );
+    let config = responses_upstream_config(spawn_upstream(app).await);
+
+    let resp = responses(State(config), responses_request(false)).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    // Passthrough preserves the upstream id verbatim.
+    assert_eq!(body["id"], "resp_123");
+    assert_eq!(body["output"][0]["content"][0]["text"], "Hello");
+
+    let seen = seen.lock().await.clone().unwrap();
+    // The downstream Responses-shaped body reached the upstream unchanged.
+    assert_eq!(seen["model"], "test-model");
+    assert!(seen.get("messages").is_none());
+    assert!(seen.get("input").is_some());
+}
+
+#[tokio::test]
+async fn messages_should_translate_to_responses_upstream() {
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
+    let app = Router::new().route(
+        "/responses",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                Json(json!({
+                    "id": "resp_abc",
+                    "object": "response",
+                    "created_at": 1_700_000_000_u64,
+                    "model": "claude-test",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_1",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Howdy", "annotations": []}]
+                    }],
+                    "usage": {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
+                }))
+            }
+        }),
+    );
+    let config = responses_upstream_config(spawn_upstream(app).await);
+
+    let resp = messages(State(config), anthropic_messages_request(false)).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    // Anthropic-shaped response built from the Responses upstream's output[].
+    assert_eq!(body["type"], "message");
+    assert_eq!(body["role"], "assistant");
+    assert_eq!(body["content"][0]["type"], "text");
+    assert_eq!(body["content"][0]["text"], "Howdy");
+    assert_eq!(body["stop_reason"], "end_turn");
+    assert_eq!(body["usage"]["input_tokens"], 4);
+    assert_eq!(body["usage"]["output_tokens"], 2);
+
+    // Upstream saw a Responses-shaped request translated from the Anthropic
+    // downstream body.
+    let seen = seen.lock().await.clone().unwrap();
+    assert!(seen.get("input").is_some());
+    assert!(seen.get("messages").is_none());
+    assert_eq!(seen["model"], "claude-test");
+    assert_eq!(seen["max_output_tokens"], 256);
+}
+
+#[tokio::test]
+async fn chat_completions_should_reject_non_chat_upstream_with_501() {
+    // chat downstream + responses upstream → not implemented yet.
+    let app = Router::new().route(
+        "/responses",
+        post(|| async {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "should not have been called",
+            )
+        }),
+    );
+    let config = responses_upstream_config(spawn_upstream(app).await);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hi"}]
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let resp = chat_completions(State(config), req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("/v1/responses"));
+}
+
 #[tokio::test]
 async fn messages_should_reject_streaming_with_chat_completions_upstream() {
     // No upstream call expected; the endpoint should short-circuit with 501.

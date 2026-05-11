@@ -109,6 +109,24 @@ pub async fn responses(State(state): State<Arc<AppState>>, req: Request<Body>) -
                     Some(anthropic_req),
                 )
             }
+            UpstreamApiFormat::Responses => {
+                // Responses upstream → passthrough. We may rewrite `model`
+                // when routing strips a `name:` prefix; otherwise the
+                // original request body is forwarded byte-for-byte.
+                let body = if upstream_model != responses_req.model {
+                    let mut upstream_json = request_json.clone();
+                    if let Some(obj) = upstream_json.as_object_mut() {
+                        obj.insert(
+                            "model".into(),
+                            serde_json::Value::String(upstream_model.clone()),
+                        );
+                    }
+                    serde_json::to_vec(&upstream_json).unwrap_or_else(|_| body_bytes.to_vec())
+                } else {
+                    body_bytes.to_vec()
+                };
+                (format!("{upstream_url}/responses"), body, None)
+            }
         };
         log_upstream_target("[responses]", upstream_config, &target);
 
@@ -122,7 +140,7 @@ pub async fn responses(State(state): State<Arc<AppState>>, req: Request<Body>) -
                 upstream_config,
             );
             let builder = match upstream_config.api_format {
-                UpstreamApiFormat::ChatCompletions => builder,
+                UpstreamApiFormat::ChatCompletions | UpstreamApiFormat::Responses => builder,
                 UpstreamApiFormat::AnthropicMessages => apply_anthropic_headers(builder),
             };
             builder.body(upstream_body.clone())
@@ -284,6 +302,21 @@ fn handle_streaming_response(
     model: String,
     upstream_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
+    if upstream_api_format == UpstreamApiFormat::Responses {
+        tracing::info!("[responses] streaming passthrough (responses upstream)");
+        let stream = upstream_resp.bytes_stream();
+        let body = Body::from_stream(stream.map(move |r| {
+            let _upstream_permit = &upstream_permit;
+            r.map_err(std::io::Error::other)
+        }));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(body)
+            .unwrap();
+    }
+
     tracing::info!("[responses] starting stream conversion");
     let stream = upstream_resp.bytes_stream();
 
@@ -347,6 +380,14 @@ fn handle_streaming_response(
                             }
 
                             match upstream_api_format {
+                                UpstreamApiFormat::Responses => {
+                                    // Unreachable: Responses upstream is
+                                    // forwarded byte-for-byte before this
+                                    // state machine is constructed.
+                                    unreachable!(
+                                        "responses passthrough should not reach SSE decoder"
+                                    );
+                                }
                                 UpstreamApiFormat::ChatCompletions => {
                                     let chunk: ChatChunk = match serde_json::from_str(&data) {
                                         Ok(c) => c,
@@ -477,6 +518,21 @@ async fn handle_non_streaming_response(
 ) -> Response {
     match upstream_resp.bytes().await {
         Ok(bytes) => {
+            // Responses upstream → just pass the JSON through; the upstream
+            // already speaks Responses API so no shape conversion is needed.
+            if upstream_api_format == UpstreamApiFormat::Responses {
+                tracing::info!(
+                    "[responses] done (passthrough), {}B, status={status}, elapsed={}ms",
+                    bytes.len(),
+                    start.elapsed().as_millis()
+                );
+                let mut resp = Response::new(Body::from(bytes));
+                *resp.status_mut() = status;
+                resp.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                return resp;
+            }
+
             let responses_resp = match upstream_api_format {
                 UpstreamApiFormat::ChatCompletions => {
                     let chat_resp: ChatResponse = match serde_json::from_slice(&bytes) {
@@ -507,6 +563,9 @@ async fn handle_non_streaming_response(
                         }
                     };
                     convert::anthropic_to_responses(&anthropic_resp)
+                }
+                UpstreamApiFormat::Responses => {
+                    unreachable!("responses passthrough handled before this match")
                 }
             };
             let out = serde_json::to_vec(&responses_resp).unwrap();

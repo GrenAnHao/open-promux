@@ -49,6 +49,22 @@ pub async fn chat_completions(State(state): State<Arc<AppState>>, req: Request<B
         let upstream = selection.upstream;
         let upstream_config = &upstream.config;
         log_model_route("[passthrough]", &selection);
+
+        // Cross-format `/v1/chat/completions` against non-chat upstreams is
+        // not yet implemented. Surface a clear `501` so callers know to use
+        // `/v1/responses` (which already supports both directions).
+        if upstream_config.api_format != crate::config::UpstreamApiFormat::ChatCompletions {
+            tracing::warn!(
+                "[passthrough] /v1/chat/completions against non-ChatCompletions upstream is not yet implemented"
+            );
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                "/v1/chat/completions against an `anthropic_messages` or `responses` upstream is not yet implemented. \
+                 Use `/v1/responses` (which bridges all three formats), or set the upstream's `api_format` to `chat_completions`.",
+            )
+                .into_response();
+        }
+
         if upstream.check_rate_limits(request_tokens).await.is_err() {
             if can_failover {
                 tracing::warn!("[passthrough] upstream rate limit exceeded; failing over");

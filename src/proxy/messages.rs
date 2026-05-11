@@ -117,6 +117,30 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
                     return response;
                 }
             }
+            UpstreamApiFormat::Responses => {
+                if is_stream {
+                    tracing::warn!(
+                        "[messages] Responses upstream + Anthropic streaming not yet supported"
+                    );
+                    return (
+                        StatusCode::NOT_IMPLEMENTED,
+                        "Streaming `/v1/messages` against a Responses upstream is not yet implemented. \
+                         Use an `api_format = \"anthropic_messages\"` upstream, or call `/v1/responses` (which speaks the upstream natively).",
+                    )
+                        .into_response();
+                }
+                if let Some(response) = handle_responses_to_anthropic_non_streaming(
+                    upstream,
+                    &selection,
+                    &request_json,
+                    can_failover,
+                    start,
+                )
+                .await
+                {
+                    return response;
+                }
+            }
         }
     }
 
@@ -400,6 +424,239 @@ async fn handle_chat_to_anthropic_non_streaming(
     resp.headers_mut()
         .insert("content-type", "application/json".parse().unwrap());
     Some(resp)
+}
+
+/// Anthropic downstream + Responses upstream (non-streaming).
+///
+/// Translation chain: anthropic-request → responses-request → upstream
+/// /responses → responses-response → anthropic-response. The middle layer
+/// reuses the existing converters the `/v1/responses` endpoint already
+/// exercises in production.
+async fn handle_responses_to_anthropic_non_streaming(
+    upstream: &UpstreamState,
+    selection: &UpstreamSelection<'_>,
+    request_json: &serde_json::Value,
+    can_failover: bool,
+    start: Instant,
+) -> Option<Response> {
+    let upstream_config = &upstream.config;
+
+    let mut responses_req = match anthropic_value_to_responses_request(request_json) {
+        Ok(req) => req,
+        Err(message) => {
+            tracing::error!("[messages] failed to translate anthropic request: {message}");
+            return Some((StatusCode::BAD_REQUEST, message).into_response());
+        }
+    };
+    if let Some(upstream_model) = selection.upstream_model.as_ref() {
+        responses_req.model = upstream_model.clone();
+    }
+    let responses_body = match serde_json::to_vec(&responses_req) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("[messages] failed to serialize responses request: {e}");
+            return Some((StatusCode::INTERNAL_SERVER_ERROR, "conversion error").into_response());
+        }
+    };
+
+    let upstream_url = upstream_config.url.trim_end_matches('/');
+    let target = format!("{upstream_url}/responses");
+    log_upstream_target("[messages]", upstream_config, &target);
+
+    let upstream_permit = upstream.acquire_permit().await;
+    let upstream_resp = match send_with_retries("[messages]", upstream_config, || {
+        apply_upstream_auth(
+            upstream
+                .client
+                .post(&target)
+                .header("content-type", "application/json"),
+            upstream_config,
+        )
+        .body(responses_body.clone())
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if can_failover {
+                tracing::warn!("[messages] upstream request failed: {e}; failing over");
+                return None;
+            }
+            tracing::error!("[messages] upstream request failed: {e}");
+            return Some((StatusCode::BAD_GATEWAY, "upstream request failed").into_response());
+        }
+    };
+
+    let status =
+        StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    log_upstream_status("[messages]", selection, status);
+
+    if can_failover && should_retry_status(status) {
+        tracing::warn!("[messages] upstream returned {status}; failing over");
+        return None;
+    }
+
+    let bytes = match upstream_resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("[messages] failed to read upstream response: {e}");
+            return Some(
+                (StatusCode::BAD_GATEWAY, "failed to read upstream response").into_response(),
+            );
+        }
+    };
+
+    if status.is_client_error() || status.is_server_error() {
+        tracing::warn!(
+            "[messages] upstream error: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        dump_upstream_error_debug(
+            "[messages]",
+            status,
+            upstream_config,
+            &target,
+            request_json,
+            &responses_body,
+            &bytes,
+        );
+        let mut resp = Response::new(Body::from(bytes));
+        *resp.status_mut() = status;
+        resp.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        return Some(resp);
+    }
+
+    let responses_value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("[messages] failed to parse responses upstream response: {e}");
+            return Some(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("invalid upstream response: {e}"),
+                )
+                    .into_response(),
+            );
+        }
+    };
+
+    let anthropic_value = responses_value_to_anthropic_value(&responses_value);
+    let out = serde_json::to_vec(&anthropic_value).unwrap_or_default();
+
+    drop(upstream_permit);
+
+    tracing::info!(
+        "[messages] done (responses→anthropic), {}B, elapsed={}ms",
+        out.len(),
+        start.elapsed().as_millis()
+    );
+
+    let mut resp = Response::new(Body::from(out));
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    Some(resp)
+}
+
+/// Convert a Responses-API JSON response into the Anthropic Messages JSON
+/// shape. Walks `output[]` items: `message` → text content blocks (with the
+/// optional `reasoning_content` summarised into a `thinking` block);
+/// `function_call` → `tool_use` block. Usage and stop reason are mapped
+/// best-effort.
+fn responses_value_to_anthropic_value(resp: &serde_json::Value) -> serde_json::Value {
+    let id = resp
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("msg_unknown")
+        .to_string();
+    let model = resp
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let mut content_blocks: Vec<serde_json::Value> = Vec::new();
+    let mut last_finish: Option<String> = None;
+    if let Some(items) = resp.get("output").and_then(|v| v.as_array()) {
+        for item in items {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    if let Some(reasoning) = item.get("reasoning_content").and_then(|r| r.as_str())
+                        && !reasoning.is_empty()
+                    {
+                        content_blocks.push(serde_json::json!({
+                            "type": "thinking",
+                            "thinking": reasoning
+                        }));
+                    }
+                    if let Some(parts) = item.get("content").and_then(|c| c.as_array()) {
+                        for part in parts {
+                            if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                                && !text.is_empty()
+                            {
+                                content_blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }));
+                            }
+                        }
+                    }
+                    last_finish = Some("end_turn".into());
+                }
+                Some("function_call") => {
+                    let id = item
+                        .get("call_id")
+                        .or_else(|| item.get("id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    let input = serde_json::from_str::<serde_json::Value>(arguments)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    content_blocks.push(serde_json::json!({
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": input
+                    }));
+                    last_finish = Some("tool_use".into());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let usage = resp.get("usage").map(|u| {
+        let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        serde_json::json!({
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        })
+    });
+
+    let mut out = serde_json::Map::new();
+    out.insert("id".into(), serde_json::Value::String(id));
+    out.insert("type".into(), serde_json::Value::String("message".into()));
+    out.insert("role".into(), serde_json::Value::String("assistant".into()));
+    out.insert("model".into(), serde_json::Value::String(model));
+    out.insert("content".into(), serde_json::Value::Array(content_blocks));
+    out.insert(
+        "stop_reason".into(),
+        serde_json::Value::String(last_finish.unwrap_or_else(|| "end_turn".into())),
+    );
+    if let Some(usage) = usage {
+        out.insert("usage".into(), usage);
+    }
+
+    serde_json::Value::Object(out)
 }
 
 /// Apply the rectifier to a body that's already in Anthropic format. Same
