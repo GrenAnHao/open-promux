@@ -73,6 +73,7 @@ pub struct ServerStartInfo {
 /// accept loop to exit.
 pub struct ServerHandle {
     info: ServerStartInfo,
+    state: Arc<AppState>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join: Option<JoinHandle<()>>,
 }
@@ -91,6 +92,14 @@ impl ServerHandle {
     /// Returns the start instant.
     pub fn started_at(&self) -> Instant {
         self.info.started_at
+    }
+
+    /// Cloneable handle to the running server's [`AppState`].
+    ///
+    /// Used by the desktop wrapper to read live traffic statistics without
+    /// going through the HTTP surface.
+    pub fn state(&self) -> &Arc<AppState> {
+        &self.state
     }
 
     /// Sends the shutdown signal and waits for the server task to exit.
@@ -135,7 +144,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// [`ServerHandle::shutdown`] to stop gracefully.
 pub async fn serve(addr: SocketAddr, config: Config) -> Result<ServerHandle, ServerStartError> {
     let state = Arc::new(AppState::new(config));
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let listener = TcpListener::bind(addr)
         .await
@@ -161,6 +170,7 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<ServerHandle, Ser
             local_addr,
             started_at,
         },
+        state,
         shutdown_tx: Some(shutdown_tx),
         join: Some(join),
     })

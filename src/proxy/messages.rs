@@ -75,9 +75,9 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
             return (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded").into_response();
         }
 
-        match upstream_config.api_format {
+        let response_opt = match upstream_config.api_format {
             UpstreamApiFormat::AnthropicMessages => {
-                if let Some(response) = handle_anthropic_passthrough(
+                handle_anthropic_passthrough(
                     &state,
                     upstream,
                     &selection,
@@ -89,9 +89,6 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
                     start,
                 )
                 .await
-                {
-                    return response;
-                }
             }
             UpstreamApiFormat::ChatCompletions => {
                 if is_stream {
@@ -105,7 +102,7 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
                     )
                         .into_response();
                 }
-                if let Some(response) = handle_chat_to_anthropic_non_streaming(
+                handle_chat_to_anthropic_non_streaming(
                     upstream,
                     &selection,
                     &request_json,
@@ -113,9 +110,6 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
                     start,
                 )
                 .await
-                {
-                    return response;
-                }
             }
             UpstreamApiFormat::Responses => {
                 if is_stream {
@@ -129,7 +123,7 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
                     )
                         .into_response();
                 }
-                if let Some(response) = handle_responses_to_anthropic_non_streaming(
+                handle_responses_to_anthropic_non_streaming(
                     upstream,
                     &selection,
                     &request_json,
@@ -137,10 +131,22 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
                     start,
                 )
                 .await
-                {
-                    return response;
-                }
             }
+        };
+
+        if let Some(response) = response_opt {
+            let response_status = response.status();
+            record_request_metric(
+                &state,
+                upstream_config,
+                model,
+                response_status.is_success(),
+                body_bytes.len() as u64,
+                0,
+                start.elapsed().as_millis() as u64,
+            )
+            .await;
+            return response;
         }
     }
 

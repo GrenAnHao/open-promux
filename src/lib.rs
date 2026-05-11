@@ -11,6 +11,7 @@ mod convert;
 pub mod logs;
 mod proxy;
 mod runtime;
+pub mod stats;
 mod types;
 
 pub use config::{
@@ -18,4 +19,6 @@ pub use config::{
     UpstreamApiFormat, UpstreamConfig, UpstreamProxyConfig, UpstreamProxyType,
 };
 pub use logs::{LogBus, LogBusLayer, LogLine};
+pub use proxy::AppState;
 pub use runtime::{ServerHandle, ServerStartError, ServerStartInfo, build_router, run_cli, serve};
+pub use stats::{CounterSnapshot, ModelCounters, TrafficSnapshot, TrafficStats, UpstreamCounters};

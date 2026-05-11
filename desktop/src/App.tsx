@@ -14,6 +14,7 @@ import { DashboardPage } from "@/pages/dashboard";
 import { LogsPage } from "@/pages/logs";
 import { RoutingPage } from "@/pages/routing";
 import { SettingsPage } from "@/pages/settings";
+import { StatsPage } from "@/pages/stats";
 import { UpstreamsPage } from "@/pages/upstreams";
 
 function App() {
@@ -70,6 +71,7 @@ function App() {
           <TabsTrigger value="dashboard">{t("tabs.dashboard")}</TabsTrigger>
           <TabsTrigger value="upstreams">{t("tabs.upstreams")}</TabsTrigger>
           <TabsTrigger value="routing">{t("tabs.routing")}</TabsTrigger>
+          <TabsTrigger value="stats">{t("tabs.stats")}</TabsTrigger>
           <TabsTrigger value="logs">{t("tabs.logs")}</TabsTrigger>
           <TabsTrigger value="settings">{t("tabs.settings")}</TabsTrigger>
         </TabsList>
@@ -83,6 +85,9 @@ function App() {
           </TabsContent>
           <TabsContent value="routing">
             <RoutingPage />
+          </TabsContent>
+          <TabsContent value="stats">
+            <StatsPage />
           </TabsContent>
           <TabsContent value="logs" className="flex flex-1 min-h-0 flex-col">
             <LogsPage />

@@ -7,7 +7,7 @@
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-use open_promux::{Config, LogLine, ServerStartError, serve};
+use open_promux::{Config, LogLine, ServerStartError, TrafficSnapshot, serve};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -308,6 +308,27 @@ pub async fn save_preferences(
     let config_path = state.config_path.lock().await.clone();
     let path = preferences::preferences_path(&config_path);
     preferences::save(&path, &preferences)
+}
+
+#[tauri::command]
+pub async fn get_traffic_stats(state: State<'_, DesktopState>) -> Result<TrafficSnapshot, String> {
+    let server = state.server.lock().await;
+    let Some(handle) = server.as_ref() else {
+        // Server not running yet → return an empty snapshot so the UI can
+        // still render its table headers without an error toast.
+        return Ok(TrafficSnapshot::default());
+    };
+    Ok(handle.state().traffic_stats().snapshot().await)
+}
+
+#[tauri::command]
+pub async fn clear_traffic_stats(state: State<'_, DesktopState>) -> Result<(), String> {
+    let server = state.server.lock().await;
+    let Some(handle) = server.as_ref() else {
+        return Ok(());
+    };
+    handle.state().traffic_stats().clear().await;
+    Ok(())
 }
 
 fn write_config_text(path: &std::path::Path, content: &str) -> Result<(), String> {

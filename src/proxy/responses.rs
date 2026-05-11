@@ -275,6 +275,16 @@ pub async fn responses(State(state): State<Arc<AppState>>, req: Request<Body>) -
             &upstream_body,
             &err_bytes,
         );
+        record_request_metric(
+            &state,
+            upstream_config,
+            Some(&responses_req.model),
+            false,
+            body_bytes.len() as u64,
+            err_bytes.len() as u64,
+            start.elapsed().as_millis() as u64,
+        )
+        .await;
         let mut resp = Response::new(Body::from(err_bytes));
         *resp.status_mut() = status;
         resp.headers_mut()
@@ -284,10 +294,32 @@ pub async fn responses(State(state): State<Arc<AppState>>, req: Request<Body>) -
 
     // ── Non-streaming ──
     if !is_stream {
-        return handle_non_streaming_response(upstream_resp, status, upstream_api_format, start)
-            .await;
+        let response =
+            handle_non_streaming_response(upstream_resp, status, upstream_api_format, start).await;
+        let response_status = response.status();
+        record_request_metric(
+            &state,
+            upstream_config,
+            Some(&responses_req.model),
+            response_status.is_success(),
+            body_bytes.len() as u64,
+            0,
+            start.elapsed().as_millis() as u64,
+        )
+        .await;
+        return response;
     }
 
+    record_request_metric(
+        &state,
+        upstream_config,
+        Some(&responses_req.model),
+        true,
+        body_bytes.len() as u64,
+        0,
+        start.elapsed().as_millis() as u64,
+    )
+    .await;
     handle_streaming_response(
         upstream_resp,
         upstream_api_format,

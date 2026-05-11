@@ -17,6 +17,7 @@ use std::{
 
 use crate::config::{Config, LoadBalanceStrategy, UpstreamApiFormat, UpstreamConfig};
 use crate::convert;
+use crate::stats::TrafficStats;
 use crate::types::*;
 
 const MAX_RETRIES: usize = 3;
@@ -30,6 +31,7 @@ pub struct AppState {
     next_upstream: AtomicUsize,
     global_request_limiter: Option<FixedWindowRateLimiter>,
     global_token_limiter: Option<FixedWindowRateLimiter>,
+    traffic_stats: Arc<TrafficStats>,
 }
 
 struct UpstreamState {
@@ -103,7 +105,15 @@ impl AppState {
             next_upstream: AtomicUsize::new(0),
             global_request_limiter,
             global_token_limiter,
+            traffic_stats: Arc::new(TrafficStats::new()),
         }
+    }
+
+    /// Cloneable handle to the in-process traffic statistics. Lives next
+    /// to the running server and is wiped only when the server restarts
+    /// or [`TrafficStats::clear`] is called explicitly.
+    pub fn traffic_stats(&self) -> Arc<TrafficStats> {
+        self.traffic_stats.clone()
     }
 
     fn select_index(&self, len: usize) -> usize {

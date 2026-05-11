@@ -57,9 +57,9 @@ evolving into a general-purpose LLM gateway:
 | ♻️ **Retry & passthrough** | Auto-retries `403 / 429 / 5xx` and connection errors (3 attempts), preserves upstream error bodies otherwise. |
 | 🔐 **Flexible auth** | Defaults to `Authorization: Bearer <key>`; custom header names like `api-key` supported per upstream. |
 | 🖥️ **Desktop console** | Tauri 2 app with terminal-console aesthetic, system tray, autostart, virtualised log stream, EN/中 bilingual UI. |
-| 📡 **Anthropic downstream** | `/v1/messages` accepts Anthropic Messages requests; passes through to Anthropic upstreams, or translates to Chat Completions / Responses upstreams (non-streaming today). |
-| 🌀 **Responses upstream** | `api_format = "responses"` lets the upstream itself speak the Responses API; `/v1/responses` becomes a clean passthrough (full streaming SSE), `/v1/messages` translates Anthropic ⇄ Responses. |
-| 📊 **Traffic stats (in progress)** | Per-model / per-upstream call counts, tokens, latency histograms — see [Roadmap](#%EF%B8%8F-roadmap). |
+| 📡 **Anthropic / Responses downstream** | `/v1/messages` accepts Anthropic Messages; `/v1/chat/completions` now bridges into Anthropic / Responses upstreams (non-streaming). |
+| 🌀 **Responses upstream** | `api_format = "responses"` lets the upstream itself speak the Responses API; `/v1/responses` becomes a clean passthrough (full streaming SSE), `/v1/messages` / `/v1/chat/completions` translate. |
+| 📊 **Traffic stats** | Per-model / per-upstream live counters: requests / success / error / bytes in & out / latency avg & max. Visible in the desktop Stats tab. |
 | 🚀 **Performance** | Long-lived `reqwest` clients per upstream, HTTP/2 multiplexing when available, Tokio multi-thread runtime. |
 
 <details>
@@ -117,8 +117,8 @@ gateway. Current direction:
 
 | Tier | Items |
 | --- | --- |
-| **Now** | All three protocols are first-class on **both** ends: Responses ⇄ Chat Completions ⇄ Anthropic Messages, including a passthrough mode for `api_format = "responses"` upstreams. `/v1/responses`, `/v1/messages`, `/v1/chat/completions` route to any upstream format with translation. Streaming SSE for Responses downstream and Anthropic-passthrough on `/v1/messages`. Multi-upstream routing, load balancing, health, retry, Tauri 2 desktop console (bilingual UI). |
-| **Next** | Per-model / per-upstream **traffic stats** (calls, tokens in/out, latency p50/p95/p99) inspired by `cc-switch`. SSE bridges for the remaining cells in the [any-to-any matrix](#any-to-any-matrix) (Chat downstream against Anthropic / Responses upstream; Anthropic downstream against Chat / Responses upstream streaming). Quick-switch upstream profiles in the desktop UI. |
+| **Now** | All three protocols are first-class on **both** ends: Responses ⇄ Chat Completions ⇄ Anthropic Messages, including a passthrough mode for `api_format = "responses"` upstreams. `/v1/responses`, `/v1/messages`, `/v1/chat/completions` route to any upstream format with translation. Streaming SSE for the Responses downstream and Anthropic-passthrough on `/v1/messages`. Live **traffic stats** with a dedicated desktop Stats tab. Multi-upstream routing, load balancing, health, retry, Tauri 2 desktop console (bilingual UI). |
+| **Next** | Streaming SSE bridges for the remaining matrix cells (Chat downstream against Anthropic / Responses upstream; Anthropic downstream against Chat / Responses upstream). Latency percentiles (p50 / p95 / p99) and cost estimates in traffic stats. Quick-switch upstream profiles in the desktop UI. |
 | **Later** | Additional output protocols (OpenAI Assistants, Gemini, Ollama native, …). Cost tracking, alerts, request replay, structured audit log. |
 
 Open an issue if you want to nudge the priority of something here.
@@ -174,7 +174,7 @@ process so you never need a second terminal:
 | **Routing** | Load balance, health, failover, model-alias rules. |
 | **Logs** | Virtualised log stream (handles thousands of lines/sec); level filter, tail toggle, copy / clear. |
 | **Settings** | Port, auth_key, performance, health, rectifier, autostart, language. |
-| **Stats** _(in progress)_ | Per-model / per-upstream traffic stats: call counts, tokens, latency. |
+| **Stats** | Per-model / per-upstream traffic stats: call counts, tokens, latency. |
 
 Visual identity: deep-carbon palette (`#0B0F14`) with mint accent (`#5BE7C4`),
 1px borders, monospace data labels. Window close hides to tray; left-click
@@ -321,7 +321,7 @@ The full matrix of downstream protocols × upstream `api_format` values:
 | --- | --- | --- | --- |
 | `/v1/responses` | ✅ stream + non-stream | ✅ stream + non-stream | ✅ stream + non-stream **passthrough** |
 | `/v1/messages` | ✅ non-stream (`501` for stream) | ✅ stream + non-stream **passthrough** | ✅ non-stream (`501` for stream) |
-| `/v1/chat/completions` | ✅ stream + non-stream **passthrough** | ⏳ planned (`501` today) | ⏳ planned (`501` today) |
+| `/v1/chat/completions` | ✅ stream + non-stream **passthrough** | ✅ non-stream (`501` for stream) | ✅ non-stream (`501` for stream) |
 
 **TL;DR**: pick the downstream that fits your client; pick the upstream
 `api_format` that matches the provider; the gateway handles translation

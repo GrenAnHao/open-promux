@@ -2894,8 +2894,8 @@ async fn messages_should_translate_to_responses_upstream() {
 }
 
 #[tokio::test]
-async fn chat_completions_should_reject_non_chat_upstream_with_501() {
-    // chat downstream + responses upstream → not implemented yet.
+async fn chat_completions_should_reject_streaming_non_chat_upstream_with_501() {
+    // chat downstream + responses upstream + streaming → still 501.
     let app = Router::new().route(
         "/responses",
         post(|| async {
@@ -2914,6 +2914,7 @@ async fn chat_completions_should_reject_non_chat_upstream_with_501() {
         .body(Body::from(
             serde_json::to_vec(&json!({
                 "model": "test-model",
+                "stream": true,
                 "messages": [{"role": "user", "content": "Hi"}]
             }))
             .unwrap(),
@@ -2927,6 +2928,73 @@ async fn chat_completions_should_reject_non_chat_upstream_with_501() {
         .unwrap();
     let text = String::from_utf8_lossy(&bytes);
     assert!(text.contains("/v1/responses"));
+}
+
+#[tokio::test]
+async fn chat_completions_should_bridge_to_responses_upstream_non_streaming() {
+    // chat downstream + responses upstream (non-streaming) ✅
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
+    let app = Router::new().route(
+        "/responses",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                Json(json!({
+                    "id": "resp_x",
+                    "object": "response",
+                    "created_at": 1_700_000_000_u64,
+                    "model": "test-model",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_1",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Hello chat", "annotations": []}]
+                    }],
+                    "usage": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11}
+                }))
+            }
+        }),
+    );
+    let config = responses_upstream_config(spawn_upstream(app).await);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "Be brief."},
+                    {"role": "user", "content": "Hi"}
+                ]
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let resp = chat_completions(State(config), req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // ChatCompletion shape
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(body["choices"][0]["message"]["content"], "Hello chat");
+    assert_eq!(body["choices"][0]["finish_reason"], "stop");
+    assert_eq!(body["usage"]["prompt_tokens"], 7);
+    assert_eq!(body["usage"]["completion_tokens"], 4);
+
+    let seen = seen.lock().await.clone().unwrap();
+    assert!(seen.get("input").is_some());
+    assert_eq!(seen["instructions"], "Be brief.");
 }
 
 #[tokio::test]

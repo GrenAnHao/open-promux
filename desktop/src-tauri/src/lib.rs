@@ -56,6 +56,8 @@ pub fn run() {
             commands::set_autostart_enabled,
             commands::get_preferences,
             commands::save_preferences,
+            commands::get_traffic_stats,
+            commands::clear_traffic_stats,
         ])
         .setup(move |app| {
             log_bridge::spawn(app.handle().clone(), log_bus.clone());

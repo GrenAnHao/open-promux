@@ -115,6 +115,38 @@ pub(super) fn estimate_tokens_from_bytes(bytes: &[u8]) -> u64 {
     (bytes.len() as u64).div_ceil(4).max(1)
 }
 
+/// Best-effort name for traffic-stats bucketing. Falls back to the upstream
+/// URL when no `name = "..."` was set in config.
+pub(super) fn stats_upstream_name(config: &UpstreamConfig) -> String {
+    config.name.clone().unwrap_or_else(|| config.url.clone())
+}
+
+/// Bucket the request into [`TrafficStats`] using the per-upstream name and
+/// the requested model (falling back to `<unknown>` when the caller's body
+/// has no `model` field). Cheap: only the first call per new bucket takes
+/// the write lock; subsequent calls follow the atomic-add fast path.
+pub(super) async fn record_request_metric(
+    state: &Arc<AppState>,
+    upstream_config: &UpstreamConfig,
+    model: Option<&str>,
+    ok: bool,
+    bytes_in: u64,
+    bytes_out: u64,
+    latency_ms: u64,
+) {
+    state
+        .traffic_stats()
+        .record(
+            &stats_upstream_name(upstream_config),
+            model.unwrap_or("<unknown>"),
+            ok,
+            bytes_in,
+            bytes_out,
+            latency_ms,
+        )
+        .await;
+}
+
 pub(super) fn dump_upstream_error_debug(
     label: &str,
     status: StatusCode,

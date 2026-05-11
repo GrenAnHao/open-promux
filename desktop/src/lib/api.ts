@@ -54,7 +54,39 @@ export const api = {
   getPreferences: () => invoke<DesktopPreferences>("get_preferences"),
   savePreferences: (preferences: DesktopPreferences) =>
     invoke<void>("save_preferences", { preferences }),
+
+  // ---- traffic stats ----
+  getTrafficStats: () => invoke<TrafficSnapshot>("get_traffic_stats"),
+  clearTrafficStats: () => invoke<void>("clear_traffic_stats"),
 };
+
+export interface CounterSnapshot {
+  requests_total: number;
+  requests_success: number;
+  requests_error: number;
+  bytes_in: number;
+  bytes_out: number;
+  latency_ms_avg: number;
+  latency_ms_max: number;
+}
+
+export interface UpstreamCounters {
+  upstream: string;
+  counters: CounterSnapshot;
+}
+
+export interface ModelCounters {
+  upstream: string;
+  model: string;
+  counters: CounterSnapshot;
+}
+
+export interface TrafficSnapshot {
+  uptime_seconds: number;
+  global: CounterSnapshot;
+  upstreams: UpstreamCounters[];
+  models: ModelCounters[];
+}
 
 export interface DesktopPreferences {
   language?: string | null;
