@@ -123,6 +123,10 @@ jobs:
         working-directory: desktop
         run: pnpm install --frozen-lockfile=false
 
+      - name: Generate platform icons from icon.png
+        working-directory: desktop
+        run: pnpm tauri icon src-tauri/icons/icon.png
+
       - name: Build Tauri bundle
         working-directory: desktop
         run: pnpm tauri build --target ${{ matrix.target }}
