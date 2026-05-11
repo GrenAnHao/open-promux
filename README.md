@@ -1,432 +1,416 @@
-# OpenProxy
+<div align="center">
 
-[中文文档](./README-CN.md)
+# 🛰️ open-promux
 
-OpenProxy is a Rust/Axum API conversion proxy for Codex App users. It exposes an OpenAI Responses API-compatible endpoint for Codex App while forwarding requests to upstream providers such as MIMO, DeepSeek V4, and other OpenAI-compatible Chat Completions services.
+**A multi-upstream LLM API gateway: protocol bridging, traffic shaping, and model fusion — under one roof.**
 
-The project solves the common pain point where a model provider exposes an OpenAI-compatible `/chat/completions` API but cannot be connected to Codex App directly. OpenProxy converts Codex App's `/v1/responses` traffic to upstream `/chat/completions`, keeps a direct `/v1/chat/completions` passthrough route, and also proxies `/v1/models`.
+`open-promux` aggregates many providers (OpenAI-compatible, Anthropic Messages, future protocols…) behind one endpoint, routes by model id, and ships with a Tauri 2 desktop console for live status, log streaming, and (soon) usage analytics.
 
-## Hot Features
+[![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white)](https://tauri.app/)
+[![Axum](https://img.shields.io/badge/Axum-0.8-5BE7C4)](https://github.com/tokio-rs/axum)
+[![License](https://img.shields.io/badge/License-MIT-blue)](#license)
+[![中文文档](https://img.shields.io/badge/Docs-中文-red)](./README-CN.md)
 
-| Feature | What it does | Why it matters |
-| --- | --- | --- |
-| Codex App compatibility | Converts Codex App `/v1/responses` traffic to OpenAI-compatible upstream Chat Completions | Use MIMO, DeepSeek V4, and similar providers that cannot connect to Codex App directly |
-| Responses API bridge | Converts `/v1/responses` to upstream Chat Completions | Use Responses-compatible clients with Chat Completions-only providers |
-| Streaming SSE conversion | Converts Chat Completions SSE into Responses API SSE events | Keeps streaming output, tool call deltas, and final completion events compatible |
-| Multi-upstream model routing | Aggregates `/v1/models` and routes requests by `model` | Use multiple providers behind one OpenAI-compatible endpoint |
-| Persistent upstream connections | Reuses one reqwest client and connection pool per upstream | Avoids repeated TCP/TLS/proxy connection setup |
-| Load balancing and failover | Supports first-match or round-robin routing with optional automatic failover | Improves availability when multiple upstreams expose the same model |
-| RPM/TPM and concurrency limits | Supports optional global and per-upstream request, token, and concurrency limits | Protects upstreams from overload without changing defaults |
-| Health checks | Periodically checks upstream `/models` and skips unhealthy upstreams | Keeps traffic away from unavailable providers |
-| Tool call adaptation | Converts tools, tool_choice, and streamed tool call arguments | Enables agent/tool workflows across different API formats |
-| Retry and error passthrough | Retries 403/429/5xx and preserves upstream error bodies | Improves reliability while keeping upstream failures observable |
-| OpenAI-compatible auth | Defaults to `Authorization: Bearer <api_key>` | Works out of the box with OpenAI-style providers and custom auth headers |
+</div>
 
-## Typical Use Case: Codex App + OpenAI-Compatible Providers
+---
 
-Many model providers expose an OpenAI-compatible Chat Completions API, but Codex App expects the Responses API protocol. OpenProxy sits between Codex App and those providers:
+## ✨ What it is
 
 ```text
-Codex App -> OpenProxy /v1/responses -> MIMO / DeepSeek V4 / other /chat/completions providers
+┌────────────┐                    ┌─────────────────┐                      ┌──────────────┐
+│  Any LLM   │                    │   open-promux   │   /chat/completions  │  OpenAI-     │
+│  client:   │  /v1/responses     │                 │ ───────────────────► │  compatible  │
+│  Codex App │ ─────────────────► │  ┌───────────┐  │   /messages          │  Anthropic   │
+│  Claude SDK│  /v1/messages      │  │  router   │  │ ───────────────────► │  local LLMs  │
+│  any other │ ─────────────────► │  │  + LB     │  │   (more soon)        │  ……          │
+│            │  /v1/chat/...      │  │  + health │  │                      │              │
+│            │ ─────────────────► │  └───────────┘  │                      │              │
+└────────────┘                    └─────────────────┘                      └──────────────┘
+                                            │
+                                            ▼
+                                   🖥️  Tauri 2 desktop console
+                                   (status, logs, soon: usage stats)
 ```
 
-This lets you keep using Codex App while switching the actual model backend to providers that are not natively compatible with Codex App.
+`open-promux` started as a Codex App ⇄ Chat Completions adapter and is
+evolving into a general-purpose LLM gateway:
 
-Point Codex App's OpenAI-compatible base URL to OpenProxy:
+- **Protocol bridge** — translate between Responses API, Chat Completions, and Anthropic Messages today; more output protocols planned.
+- **Multi-upstream routing** — list any number of providers, route by model id, fail over on errors, balance load.
+- **Model fusion** — expose models from many vendors under one merged catalog with `name:model` ids.
+- **Operability** — Tauri 2 desktop console with real-time logs and (planned) per-model usage statistics inspired by `cc-switch`.
 
-```text
-http://127.0.0.1:8080/v1
-```
+---
 
-Then select a model id returned by OpenProxy's `/v1/models`, such as a plain upstream model id or a routed id like `deepseek:deepseek-v4`.
+## 🔥 Highlights
 
-## Features
+| Area | What you get |
+| --- | --- |
+| 🔁 **Protocol bridges** | `/v1/responses` ⇄ Chat Completions, native Anthropic Messages output, full streaming SSE in both directions, tool-call translation. |
+| 🌐 **Multi-upstream catalog** | Aggregate `/v1/models` across providers, expose ids as `name:model`, plain ids forward unchanged. |
+| ⚖️ **Load balancing** | First-match (default) or `round_robin`, with optional automatic failover for retryable errors. |
+| 🧪 **Health probes** | Periodic `/models` checks per upstream; routing skips unhealthy ones until they recover. |
+| 🚦 **Rate limiting** | Optional global & per-upstream RPM / TPM / concurrency limits, all opt-in. |
+| 🛠️ **Tool-call adaptation** | Translates `tools`, `tool_choice`, and streaming argument deltas across formats. |
+| ♻️ **Retry & passthrough** | Auto-retries `403 / 429 / 5xx` and connection errors (3 attempts), preserves upstream error bodies otherwise. |
+| 🔐 **Flexible auth** | Defaults to `Authorization: Bearer <key>`; custom header names like `api-key` supported per upstream. |
+| 🖥️ **Desktop console** | Tauri 2 app with terminal-console aesthetic, system tray, autostart, virtualised log stream, EN/中 bilingual UI. |
+| 📊 **Usage analytics (planned)** | Per-model / per-upstream call counts, tokens, latency histograms — see [Roadmap](#-roadmap). |
+| 🚀 **Performance** | Long-lived `reqwest` clients per upstream, HTTP/2 multiplexing when available, Tokio multi-thread runtime. |
 
-- **Responses API to Chat Completions**
-  - Converts incoming `/v1/responses` requests into upstream Chat Completions requests.
-  - Converts `instructions` into a system message.
-  - Supports string input and full `input[]` conversation context.
-  - Preserves user, assistant, and tool message order.
-  - Converts common parameters such as `max_output_tokens`, `temperature`, and `top_p`.
+<details>
+<summary><strong>📚 Detailed feature list (click to expand)</strong></summary>
 
-- **Chat Completions to Responses API**
-  - Converts non-streaming upstream Chat Completions responses into Responses API responses.
-  - Converts plain text output into `message` output items.
-  - Converts `tool_calls` into Responses API `function_call` output items.
-  - Generates Responses-compatible response ids, output items, usage, and status fields.
+### Responses API → Chat Completions
+- Converts `/v1/responses` requests into upstream Chat Completions requests.
+- Converts `instructions` into a system message.
+- Supports string input and full `input[]` conversation context.
+- Preserves user / assistant / tool message order.
+- Maps `max_output_tokens`, `temperature`, `top_p`, …
 
-- **Full SSE streaming conversion**
-  - Converts upstream Chat Completions SSE streams into Responses API SSE events.
-  - Supports events such as `response.created`, `response.in_progress`, `response.output_item.added`, `response.output_text.delta`, and `response.completed`.
-  - Includes an SSE decoder that handles TCP chunking, partial packets, and events split across chunks.
-  - Preserves multibyte characters such as Chinese text and emoji when split across chunks.
-  - Flushes unfinished output items when upstream sends `[DONE]` or closes the connection.
+### Chat Completions → Responses API
+- Converts non-streaming responses into Responses API JSON.
+- Converts plain text → `message` output items.
+- Converts `tool_calls` → `function_call` output items.
+- Generates Responses-compatible response ids, output, usage, and status fields.
 
-- **Tool call adaptation**
-  - Converts Responses API `tools` into Chat Completions `tools`.
-  - Converts Responses API function `tool_choice` into a Chat Completions-compatible shape.
-  - Supports streaming tool call argument deltas via `response.function_call_arguments.delta`.
-  - Emits tool call completion events via `response.function_call_arguments.done` and `response.output_item.done`.
+### Streaming SSE
+- Converts upstream SSE into `response.created`, `response.in_progress`, `response.output_item.added`, `response.output_text.delta`, `response.completed`, …
+- SSE decoder handles TCP chunking, partial packets, and events split across chunks.
+- Multibyte-safe (Chinese, emoji, …) when bytes split mid-character.
+- Flushes unfinished output items when upstream sends `[DONE]` or closes early.
 
-- **Retry and error passthrough**
-  - Automatically retries upstream `403`, `429`, and `5xx` responses.
-  - Retries request send failures as well.
-  - Uses up to 3 attempts by default.
-  - Logs each attempt clearly: `attempt 1/3`, `attempt 2/3`, `attempt 3/3`.
-  - Passes through upstream error status and body, and logs upstream error bodies.
+### Multi-upstream routing
+- Both legacy `[upstream]` and `[[upstreams]]` configs supported.
+- Aggregates `/v1/models`; ids surface as `name:model` when `name` is set.
+- Plain ids forwarded unchanged; `name:model` ids strip the prefix before forwarding.
+- First-match by default; optional `round_robin` across same-model candidates.
+- Optional automatic failover for retryable upstream errors.
+- Optional health checks skip unhealthy upstreams during routing.
+- Multi-upstream startup prefetches model lists and caches briefly for routing.
 
-- **Model list proxy**
-  - Supports `GET /v1/models`.
-  - Proxies to upstream `{upstream.url}/models` for single-upstream setups.
-  - Merges model lists from all configured upstreams for multi-upstream setups.
-  - Uses the same authentication, retry, and error body passthrough behavior.
+### Performance & connection reuse
+- One long-lived `reqwest` client + connection pool per upstream.
+- HTTP/2 negotiation when supported.
+- Tokio multi-thread async runtime — no thread-per-request.
+- Optional per-upstream concurrency cap via `[performance].upstream_max_concurrent_requests`.
+- Optional global & per-upstream RPM / TPM limits, fixed 60-second window.
 
-- **Multi-upstream model routing**
-  - Supports both legacy `[upstream]` and new `[[upstreams]]` configuration.
-  - Aggregates `/v1/models` across all upstream providers.
-  - Supports optional upstream names and displays models as `name:model`.
-  - Automatically selects the upstream that lists the requested `model`.
-  - Plain model ids are forwarded unchanged.
-  - Requests using `name:model` are routed to that upstream and forwarded as the raw upstream model id.
-  - If the same model exists in multiple upstreams, the default strategy uses the first matching upstream in config order.
-  - Supports optional `round_robin` load balancing for same-model upstream candidates.
-  - Supports optional automatic failover to the next matching upstream after retryable upstream failures.
-  - Optional health checks can skip unhealthy upstreams during routing.
-  - Prefetches model lists on startup in multi-upstream mode and caches them briefly for routing.
+### Authentication
+- `auth_header` omitted or empty → standard `Authorization`.
+- `Authorization` + raw key → automatically prefixed with `Bearer `.
+- Already-prefixed `Bearer …` keys not duplicated.
+- Custom headers (e.g. `api-key`) send the raw key value.
 
-- **Performance and connection reuse**
-  - Builds one long-lived reqwest client per configured upstream.
-  - Reuses idle TCP/TLS/proxy connections through reqwest's connection pool.
-  - Allows HTTP/2 negotiation and multiplexing when the upstream supports it.
-  - Uses Tokio's multi-thread async runtime instead of creating one thread per request.
-  - Supports optional per-upstream concurrency limiting through `[performance].upstream_max_concurrent_requests`.
-  - Supports optional global and per-upstream RPM/TPM limits. Unset or `0` means disabled.
+</details>
 
-- **Authentication compatibility**
-  - If `auth_header` is omitted or empty, OpenAI's standard `Authorization` header is used.
-  - When the header is `Authorization` and `api_key` does not already start with `Bearer `, OpenProxy sends `Authorization: Bearer <api_key>`.
-  - If `api_key` already starts with `Bearer `, the prefix is not duplicated.
-  - Custom headers such as `api-key` send the raw `api_key` value.
+---
 
-## Tech Stack
+## 🗺️ Roadmap
 
-- **Language**: Rust 2024 Edition
-- **Async runtime**: Tokio
-- **Web framework**: Axum
-- **Upstream HTTP client**: Reqwest
-- **Serialization**: Serde / serde_json
-- **Streaming**: SSE / futures
-- **Configuration**: TOML
-- **Logging**: tracing / tracing-subscriber
-- **ID generation**: UUID v4
+`open-promux` is broadening from a single-purpose Codex adapter into a
+gateway. Current direction:
 
-## Quick Start
+| Tier | Items |
+| --- | --- |
+| **Now** | Responses ⇄ Chat Completions, Anthropic Messages output, streaming SSE, tool calls, multi-upstream routing, load balancing, health, retry, Tauri 2 desktop console (with bilingual UI). |
+| **Next** | Per-model / per-upstream **usage statistics** (calls, tokens in/out, latency p50/p95/p99) inspired by `cc-switch`. Quick-switch upstream profiles in the desktop UI. |
+| **Later** | Additional output protocols (OpenAI Assistants, Gemini, Ollama native, …). Cost tracking, alerts, request replay, structured audit log. |
 
-### 1. Install
+Open an issue if you want to nudge the priority of something here.
 
-Install from npm:
+---
+
+## 🚀 Quick Start
+
+> Choose **one** of the three paths below. All three start the same Rust core.
+
+### 🟢 Path A — npm (recommended for most users)
 
 ```bash
-npm install -g @grenanhao/openproxy
+npm install -g @grenanhao/open-promux
+open-promux ./config.toml
 ```
 
-Run the installed CLI:
+### 🟢 Path B — Cargo (build from source)
 
 ```bash
-openproxy ./config.toml
+git clone https://github.com/GrenAnHao/open-promux
+cd open-promux
+cargo run -- ./config.toml
 ```
 
-You can also download native binaries from GitHub Releases:
-
-```text
-https://github.com/GrenAnHao/openai-responses-proxy/releases
-```
-
-Or build from source:
+### 🟢 Path C — Desktop console (Tauri 2)
 
 ```bash
-cargo build
+pnpm --dir desktop install
+pnpm --dir desktop dev          # hot-reload dev window
+pnpm --dir desktop build        # release bundle for current OS
 ```
 
-### 2. Configure
+The desktop window reads/writes `config.toml` from the platform config dir
+(`%APPDATA%\open-promux\` on Windows, `~/.config/open-promux/` on Linux,
+`~/Library/Application Support/open-promux/` on macOS). Use **Set config path**
+in the UI to point at any other location (e.g. share the CLI's `./config.toml`).
 
-OpenProxy reads `config.toml` from the project root by default. Start from the example file:
+> 💡 Pre-built native binaries are also published on
+> [GitHub Releases](https://github.com/GrenAnHao/open-promux/releases).
 
-```bash
-cp config.example.toml config.toml
-```
+---
 
-OpenAI-style upstream:
+## 🖥️ Desktop console
+
+The Tauri 2 frontend (`desktop/`) embeds the gateway library into the same
+process so you never need a second terminal:
+
+| Page | Does |
+| --- | --- |
+| **Dashboard** | Live status (bind / uptime / online indicator), per-upstream probe table. |
+| **Upstreams** | CRUD with dialog form; api_key, auth_header, weight, timeouts, proxy. |
+| **Routing** | Load balance, health, failover, model-alias rules. |
+| **Logs** | Virtualised log stream (handles thousands of lines/sec); level filter, tail toggle, copy / clear. |
+| **Settings** | Port, auth_key, performance, health, rectifier, autostart, language. |
+| **Stats** _(planned)_ | Per-model / per-upstream call counts, tokens, latency. |
+
+Visual identity: deep-carbon palette (`#0B0F14`) with mint accent (`#5BE7C4`),
+1px borders, monospace data labels. Window close hides to tray; left-click
+tray re-focuses. Auto-start on Windows uses the user-level Run registry key.
+
+Bilingual: English / 简体中文, switchable from the top bar or Settings.
+Choice persists in `desktop_preferences.toml` next to the gateway config.
+
+---
+
+## ⚙️ Configuration
+
+`open-promux` reads `config.toml` from the project root by default. Start
+from `config.example.toml` and pick the smallest snippet that fits.
+
+### Tier 1 — Minimal (single OpenAI-style upstream)
 
 ```toml
-port = 8080
-auth_key = "proxy-secret"
+port     = 8080
+auth_key = "proxy-secret"          # protects the gateway itself; omit to disable
 
 [upstream]
-url = "https://api.openai.com/v1"
+url     = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 ```
 
-This automatically sends:
+This sends `Authorization: Bearer sk-your-api-key` to the upstream and
+requires `Authorization: Bearer proxy-secret` from clients.
 
-```http
-Authorization: Bearer sk-your-api-key
-```
-
-`auth_key` protects OpenProxy itself. When it is set, clients must include this header when calling `/v1/models`, `/v1/responses`, or `/v1/chat/completions`:
-
-```http
-Authorization: Bearer proxy-secret
-```
-
-Leave `auth_key` unset to disable proxy-side authentication.
-
-Custom authentication header:
+### Tier 2 — Custom auth header
 
 ```toml
-port = 8080
-
 [upstream]
-url = "http://127.0.0.1:8000/v1"
-api_key = "your-secret"
-auth_header = "api-key"
+url         = "http://127.0.0.1:8000/v1"
+api_key     = "your-secret"
+auth_header = "api-key"            # sends `api-key: your-secret` (no Bearer)
 ```
 
-This sends:
-
-```http
-api-key: your-secret
-```
-
-Multi-upstream routing:
+### Tier 3 — Multi-upstream routing
 
 ```toml
 port = 8080
 
 [[upstreams]]
-name = "openai"
-url = "https://api.openai.com/v1"
+name    = "openai"
+url     = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 
 [[upstreams]]
-name = "local"
-url = "http://127.0.0.1:8000/v1"
-api_key = "your-secret"
+name        = "local"
+url         = "http://127.0.0.1:8000/v1"
+api_key     = "your-secret"
 auth_header = "api-key"
 ```
 
-With this configuration, `GET /v1/models` returns a merged model list and displays ids such as `openai:gpt-4.1-mini` or `local:qwen3`. Requests to `/v1/responses` and `/v1/chat/completions` can use those displayed ids; OpenProxy routes to the named upstream and strips the `name:` prefix before forwarding.
+`GET /v1/models` returns ids like `openai:gpt-4.1-mini` and `local:qwen3`.
+Requests using those ids are routed to the matching upstream, with the
+`name:` prefix stripped before forwarding.
 
-Optional routing, health, and performance settings:
+### Tier 4 — Advanced
 
 ```toml
 [performance]
 upstream_max_concurrent_requests = 64
-global_rpm = 600
-global_tpm = 120000
+global_rpm                       = 600
+global_tpm                       = 120000
 
 [routing]
-load_balance = "round_robin"
-automatic_failover = true
+load_balance        = "round_robin"
+automatic_failover  = true
 
 [health]
-enabled = true
-interval_millis = 30000
+enabled                  = true
+interval_millis          = 30000
 unhealthy_after_failures = 3
 ```
 
-When set, concurrency limits hold one slot per upstream request; streaming responses hold the slot until the stream finishes. RPM/TPM limits use a fixed 60-second window. Leave limits unset or set them to `0` to disable them.
+Concurrency limits hold one slot per upstream request; streaming responses
+hold the slot until the stream finishes. RPM / TPM limits use a fixed
+60-second window. Leave any limit unset or `0` to disable it.
 
-### 3. Run from source
+### Configuration reference
 
-```bash
-cargo run
-```
+| Field | Required | Default | Description |
+| --- | --- | --- | --- |
+| `port` | No | `8080` | Local listen port |
+| `auth_key` | No | empty | Bearer key required from clients; empty disables proxy auth |
+| `upstream.url` / `upstreams[].url` | Yes (one of) | — | Upstream base URL, usually ending in `/v1` |
+| `upstream.api_key` / `upstreams[].api_key` | No | empty | Upstream key |
+| `upstream.auth_header` / `upstreams[].auth_header` | No | `Authorization` | Upstream auth header name |
+| `upstreams[].name` | No | — | Routing prefix; produces ids like `name:model` |
+| `routing.load_balance` | No | `first_match` | `first_match` or `round_robin` |
+| `routing.automatic_failover` | No | `false` | Retry next upstream after retryable errors |
+| `health.enabled` | No | `false` | Periodic `/models` probe per upstream |
+| `performance.*` | No | unset / `0` | All limits opt-in |
 
-You can also pass a custom config path:
+---
 
-```bash
-cargo run -- ./config.toml
-```
+## 🔌 API
 
-By default, OpenProxy listens on:
-
-```text
-0.0.0.0:8080
-```
-
-## Deployment Commands
-
-Install and run with npm:
-
-```bash
-npm install -g @grenanhao/openproxy
-openproxy ./config.toml
-```
-
-Run with a downloaded release binary:
-
-```bash
-./openproxy ./config.toml
-```
-
-Publish a GitHub Release:
-
-```bash
-git tag -a v0.1.0 -m "OpenProxy v0.1.0"
-git push origin v0.1.0
-```
-
-Publish the npm package through GitHub Actions:
-
-```bash
-gh secret set NPM_TOKEN
-gh workflow run "Publish NPM"
-```
-
-`NPM_TOKEN` must be an npm automation token with permission to publish `@grenanhao/openproxy`.
-
-## API Endpoints
-
-### `POST /v1/responses`
-
-Accepts a Responses API request and converts it into an upstream Chat Completions request.
-
-Non-streaming example:
+### `POST /v1/responses` — Responses API ⇄ Chat Completions
 
 ```bash
 curl http://127.0.0.1:8080/v1/responses \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer proxy-secret" \
   -d '{
     "model": "gpt-4.1-mini",
     "input": "Hello, introduce yourself"
   }'
 ```
 
-Streaming example:
+Streaming, instructions, full `input[]` history, tool calls — see
+[How the conversion works](#-how-the-conversion-works) below.
 
-```bash
-curl http://127.0.0.1:8080/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4.1-mini",
-    "stream": true,
-    "input": "Stream a short answer"
-  }'
-```
-
-Full context example:
-
-```json
-{
-  "model": "gpt-4.1-mini",
-  "instructions": "You are a concise assistant.",
-  "input": [
-    {
-      "type": "message",
-      "role": "user",
-      "content": [{ "type": "input_text", "text": "Hello" }]
-    },
-    {
-      "type": "message",
-      "role": "assistant",
-      "content": [{ "type": "output_text", "text": "Hi, how can I help?" }]
-    },
-    {
-      "type": "message",
-      "role": "user",
-      "content": [{ "type": "input_text", "text": "Continue the previous topic" }]
-    }
-  ]
-}
-```
-
-### `POST /v1/chat/completions`
-
-Directly proxies to upstream `{upstream.url}/chat/completions`.
-
-Use this route for clients that already send Chat Completions requests. In multi-upstream mode, OpenProxy reads the request `model` and sends the request to the matching upstream.
+### `POST /v1/chat/completions` — direct passthrough
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4.1-mini",
-    "messages": [
-      { "role": "user", "content": "Hello" }
-    ]
+    "messages": [{ "role": "user", "content": "Hello" }]
   }'
 ```
 
-### `GET /v1/models`
+In multi-upstream mode the request `model` decides which upstream receives
+the request. Use this route for clients that already speak Chat Completions.
 
-Proxies the upstream model list. In multi-upstream mode, model lists from all configured upstreams are merged.
+### `GET /v1/models` — merged model list
 
 ```bash
 curl http://127.0.0.1:8080/v1/models
 ```
 
-## Configuration
+Single-upstream → proxy of `{upstream.url}/models`.
+Multi-upstream → merged list with `name:model` ids when `name` is set.
 
-| Field | Required | Default | Description |
-| --- | --- | --- | --- |
-| `port` | No | `8080` | Local listen port |
-| `upstream.url` | Yes for legacy single-upstream config | None | Upstream API base URL, usually ending with `/v1` |
-| `upstream.api_key` | No | Empty string | Upstream authentication key |
-| `upstream.auth_header` | No | `Authorization` | Upstream authentication header name; empty values also use `Authorization` |
-| `upstreams[].name` | No | None | Display/routing prefix for models, producing ids like `name:model` |
-| `upstreams[].url` | Yes for multi-upstream config | None | Upstream API base URL for one provider |
-| `upstreams[].api_key` | No | Empty string | Authentication key for one provider |
-| `upstreams[].auth_header` | No | `Authorization` | Authentication header name for one provider |
+---
 
-## Conversion Flow
+## 🧠 How the conversion works
 
-For `/v1/responses`:
+```mermaid
+sequenceDiagram
+    participant C as Client (Codex / Claude / …)
+    participant P as open-promux
+    participant U as Upstream
 
-1. Parse the incoming Responses API request.
-2. Select the matching upstream by checking which configured upstream advertises the requested `model`.
-3. Convert `instructions`, `input`, `tools`, `tool_choice`, and other fields into a Chat Completions-compatible request.
-4. Send the converted request to upstream `{upstream.url}/chat/completions`.
-5. Non-streaming response: parse Chat Completions JSON and convert it into Responses API JSON.
-6. Streaming response: parse upstream SSE and emit Responses API SSE events.
-7. Upstream error: retry when applicable, then pass through the final status code and error body.
+    C->>P: POST /v1/responses {model, input, tools, stream}
+    P->>P: Resolve upstream by model id
+    P->>P: Build Chat Completions payload
+    P->>U: POST /chat/completions
+    alt Streaming
+        U-->>P: SSE chunks (text / tool deltas)
+        P-->>C: SSE events (response.output_text.delta, function_call_arguments.delta, …)
+        U-->>P: [DONE]
+        P-->>C: response.completed
+    else Non-streaming
+        U-->>P: 200 OK ChatCompletion JSON
+        P-->>C: 200 OK Responses JSON
+    end
+    Note over P,U: 403/429/5xx → retry up to 3 attempts<br/>error body preserved on final failure
+```
 
-## Development Commands
+**Routing decision** for `/v1/responses` and `/v1/chat/completions`:
+
+1. Parse the request and read its `model`.
+2. Match against each upstream's advertised model list (cached briefly).
+3. Convert the body if needed (Responses → Chat Completions / Anthropic Messages).
+4. Forward to `{upstream.url}/...` with the correct auth header.
+5. On retryable upstream errors → retry, optionally fail over to the next match.
+6. Stream or buffer the response back, translated as needed.
+
+---
+
+## 🛠️ Development
 
 ```bash
 cargo fmt --check
 cargo test
-cargo clippy -- -D warnings
+cargo clippy --workspace -- -D warnings
+
+# Desktop console
+pnpm --dir desktop typecheck
+pnpm --dir desktop build:renderer
 ```
 
-Common commands:
+**Test coverage highlights:**
+
+- Full Responses `input[]` round-trip
+- `tools` / `tool_choice` translation
+- `tool_calls` → `function_call` mapping (streaming and non-streaming)
+- SSE partial-packet & multibyte-character handling
+- Fallback completion when `[DONE]` arrives without `finish_reason`
+- 403 / 429 / 5xx retry behaviour
+- `/v1/models` aggregation across multiple upstreams
+- Automatic upstream selection by requested model
+- Default `Authorization: Bearer <api_key>` semantics
+
+---
+
+## 📦 Releases
+
+Cut a GitHub Release:
 
 ```bash
-cargo fmt
-cargo run
-cargo test <test_name>
+git tag -a v0.2.0 -m "open-promux v0.2.0"
+git push origin v0.2.0
 ```
 
-## Test Coverage
+Publish to npm via Actions:
 
-The test suite covers the main contract behaviors:
+```bash
+gh secret set NPM_TOKEN
+gh workflow run "Publish NPM"
+```
 
-- Complete Responses input context conversion.
-- Responses tool/tool_choice conversion to Chat Completions.
-- Non-streaming tool_calls conversion to Responses function_call.
-- Streaming text delta conversion.
-- Streaming tool call argument delta/done events.
-- SSE partial packet and multibyte character handling.
-- Fallback output completion when `[DONE]` arrives without `finish_reason`.
-- Retry for 403/429/5xx.
-- `/v1/models` proxying and retry behavior.
-- Multi-upstream `/v1/models` aggregation.
-- Automatic upstream routing by requested model.
-- OpenAI default `Authorization: Bearer <api_key>` authentication behavior.
+`NPM_TOKEN` must be an npm automation token with publish access to
+`@grenanhao/open-promux`.
 
-## Notes
+---
 
-- Do not commit real `api_key` values to version control.
-- If you use OpenAI-compatible authentication, you can omit `auth_header`.
-- If your upstream uses a non-standard authentication header, set `auth_header` explicitly.
-- Only `403`, `429`, `5xx`, and request send failures are retried. `401` usually means authentication failed and is not retried.
+## 📝 Notes
+
+- **Never commit real `api_key` values.** `config.toml` is git-ignored by default.
+- For OpenAI-style providers, omit `auth_header` and let the default `Authorization: Bearer` kick in.
+- For non-standard upstreams, set `auth_header` explicitly (e.g. `api-key`).
+- Only `403 / 429 / 5xx` and connection errors are retried — `401` (auth failure) is **not** retried.
+- This project supersedes `openai-responses-proxy`; the old name continues to work as a starting point but new development happens here.
+
+---
+
+## License
+
+MIT.
+
+<div align="center">
+
+Built with 🦀 Rust + ⚡ Axum + 🎨 Tauri 2.
+
+</div>

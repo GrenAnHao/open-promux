@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Terminal console base sheet.
+ * Avoids glassmorphism / heavy shadows; relies on 1px borders and a flat
+ * deep-carbon background to look distinct from sibling Tauri apps.
+ */
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  html {
+    /* Tighten kerning + tabular numbers so the dense data-mono panels line up.
+     * Tabular numbers also make the live status bar (uptime / port) not jump
+     * around as the digit shapes change. */
+    font-feature-settings: "kern" 1, "tnum" 1, "cv11" 1;
+    /* Slightly tighter than Tailwind base for the dense panels, while still
+     * leaving room for CJK glyph descenders. */
+    line-height: 1.55;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background:
+      radial-gradient(circle at 20% -10%, rgba(91, 231, 196, 0.06), transparent 45%),
+      radial-gradient(circle at 110% 110%, rgba(125, 211, 252, 0.05), transparent 50%),
+      #0b0f14;
+    overscroll-behavior: none;
+  }
+
+  /* Subtle scanline noise via repeating linear gradient over the body. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.012) 0,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    z-index: 0;
+  }
+
+  *:focus-visible {
+    outline: 1px solid #5be7c4;
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: rgba(91, 231, 196, 0.25);
+    color: #f4f8fa;
+  }
+
+  /*
+   * The shell window is a fixed-size viewport: top bar + tab strip +
+   * scrollable tab body. We forbid scrolling on `html` / `body` so only
+   * the tab content area can scroll. (Scoped scrollbar styling lives
+   * under the `.scrollbar-thin` utility further below.)
+   */
+  html,
+  body {
+    overflow: hidden;
+  }
+
+  /*
+   * Hide the native `<input type="number">` spinner – the WebView2 default
+   * shows a poorly-themed white square in dark mode. Users can still use
+   * arrow keys / mouse wheel / direct typing to change the value.
+   */
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+}
+
+@layer components {
+  /* Section frame: thin border, no rounded "card" feel. */
+  .panel {
+    @apply border border-carbon-500 bg-carbon-800/70;
+  }
+
+  /* Square header strip used at the top of each surface. */
+  .panel-header {
+    @apply flex items-center justify-between gap-3 border-b border-carbon-500 bg-carbon-700/40 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-ink-400;
+  }
+
+  /* Status indicator dot with subtle pulse. */
+  .led {
+    @apply inline-block h-1.5 w-1.5 rounded-full;
+  }
+  .led-online {
+    @apply led bg-mint-400 animate-pulse-ring;
+  }
+  .led-warn {
+    @apply led bg-amber-400;
+  }
+  .led-error {
+    @apply led bg-coral-400;
+  }
+  .led-idle {
+    @apply led bg-ink-700;
+  }
+
+  /* Mono data label. */
+  .data-label {
+    @apply font-mono text-[11px] uppercase tracking-[0.18em] text-ink-500;
+  }
+
+  /* Mono data value. */
+  .data-value {
+    @apply font-mono text-sm text-ink-100;
+  }
+}
+
+@layer utilities {
+  /*
+   * Terminal-themed scrollbar. Apply to any element whose body is
+   * `overflow-auto` / `overflow-y-auto`. Thumb collapses to a visual 6px
+   * via a 2px transparent border for a thinner look while keeping the
+   * 10px hit target.
+   */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: #2a3340 transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #2a3340;
+    border: 2px solid transparent;
+    background-clip: content-box;
+    border-radius: 0;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: #5be7c4;
+    background-clip: content-box;
+  }
+  .scrollbar-thin::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}

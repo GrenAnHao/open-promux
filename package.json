@@ -1,9 +1,9 @@
 {
-  "name": "@grenanhao/openproxy",
+  "name": "@grenanhao/open-promux",
   "version": "0.2.0",
-  "description": "OpenProxy CLI: OpenAI Responses API to Chat Completions proxy with multi-upstream model routing.",
+  "description": "open-promux: multi-upstream LLM API gateway with protocol bridging, load balancing, model fusion, and a Tauri 2 desktop console.",
   "bin": {
-    "openproxy": "bin/openproxy.js"
+    "open-promux": "bin/open-promux.js"
   },
   "scripts": {
     "postinstall": "node scripts/install.js",
@@ -21,12 +21,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GrenAnHao/openai-responses-proxy.git"
+    "url": "git+https://github.com/GrenAnHao/open-promux.git"
   },
   "bugs": {
-    "url": "https://github.com/GrenAnHao/openai-responses-proxy/issues"
+    "url": "https://github.com/GrenAnHao/open-promux/issues"
   },
-  "homepage": "https://github.com/GrenAnHao/openai-responses-proxy#readme",
+  "homepage": "https://github.com/GrenAnHao/open-promux#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"

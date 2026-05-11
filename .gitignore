@@ -6,3 +6,19 @@ config.toml
 .claude/
 .spec-workflow/
 CLAUDE.md
+debug/
+
+# Desktop UI artifacts
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
+# AI / IDE assistant working dirs
+.agents/
+.junie/
+.kiro/
+.qoder/
+.trae/
+.windsurf/
+skills/

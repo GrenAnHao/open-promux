@@ -2,13 +2,13 @@
 # ===========================================
 #
 # Local listen port (default: 8080)
-# OpenProxy listens on 0.0.0.0 using this port.
+# open-promux listens on 0.0.0.0 using this port.
 # Change this when port 8080 is already used by another application.
 port = 8080
 
 # Proxy authentication key (optional)
 # When set, clients must send `Authorization: Bearer <auth_key>`
-# to OpenProxy for all proxy endpoints:
+# to open-promux for all proxy endpoints:
 #   - GET  /v1/models
 #   - POST /v1/responses
 #   - POST /v1/chat/completions
@@ -19,7 +19,7 @@ port = 8080
 # PERFORMANCE SETTINGS
 # ===========================================
 #
-# OpenProxy creates one long-lived HTTP client per upstream.
+# open-promux creates one long-lived HTTP client per upstream.
 # This reuses TCP/TLS/proxy connections and allows HTTP/2 multiplexing
 # when the upstream supports it.
 #
@@ -41,14 +41,28 @@ port = 8080
 # automatic_failover retries the next matching upstream after retryable
 # upstream failures (403, 429, or 5xx). Leave false to preserve strict
 # first-match behavior.
+#
+# fallback_model routes unmatched requested models to a configured model.
+# Like aliases, it accepts a plain model id or a prefixed `name:model` id.
+#
+# model_aliases maps client-facing model names to upstream models. Targets
+# can be plain model ids or prefixed `name:model` ids when upstream names
+# are configured. Aliases are hidden from /v1/models by default; set
+# expose_model_aliases = true only if clients must discover them.
 # [routing]
 # load_balance = "first"
 # automatic_failover = false
+# fallback_model = "local:qwen3-coder"
+# expose_model_aliases = false
+# [routing.model_aliases]
+# "gpt-5.5" = "openai:gpt-4.1"
+# "gpt-5.4" = "local:qwen3-coder"
+# "gpt-5.4-mini" = "local:qwen3-coder-mini"
 
 # HEALTH CHECK SETTINGS
 # ===========================================
 #
-# Disabled by default. When enabled, OpenProxy periodically calls
+# Disabled by default. When enabled, open-promux periodically calls
 # `{upstream.url}/models`. Failed checks mark an upstream unhealthy after
 # `unhealthy_after_failures`; unhealthy upstreams are skipped by routing.
 # [health]
@@ -56,21 +70,37 @@ port = 8080
 # interval_millis = 30000
 # unhealthy_after_failures = 3
 
+# RECTIFIER SETTINGS
+# ===========================================
+#
+# Enabled by default. Applies only to Anthropic Messages upstreams.
+# When Anthropic-compatible providers reject a request due to known
+# thinking signature or budget compatibility errors, open-promux minimally
+# rectifies the converted request and retries the same upstream once.
+# [rectifier]
+# enabled = true
+# thinking_signature = true
+# thinking_budget = true
+
 # UPSTREAM PROVIDERS
 # ===========================================
 #
 # Configure one or more upstream providers.
-# Each upstream should expose OpenAI-compatible endpoints under `url`:
+# By default, each upstream uses OpenAI-compatible Chat Completions:
 #   - GET  {url}/models
 #   - POST {url}/chat/completions
 #
-# In multi-upstream mode, OpenProxy merges all upstream model lists.
+# Set `api_format = "anthropic_messages"` for Anthropic Messages upstreams.
+# In that mode, /v1/responses is converted and forwarded to:
+#   - POST {url}/messages
+#
+# In multi-upstream mode, open-promux merges all upstream model lists.
 # If `name` is set, exposed model ids become `name:model`.
 # For example, upstream model `gpt-4.1-mini` with name `openai`
 # is exposed as `openai:gpt-4.1-mini`.
 #
 # Requests using `name:model` are routed to the named upstream.
-# Before forwarding, OpenProxy strips the `name:` prefix and sends
+# Before forwarding, open-promux strips the `name:` prefix and sends
 # the raw upstream model id.
 # Plain model ids are forwarded unchanged. In multi-upstream mode,
 # model lists are prefetched on startup and cached briefly for routing.
@@ -92,7 +122,7 @@ url = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 
 # Authentication header name (optional, default: Authorization)
-# When using Authorization, OpenProxy automatically sends
+# When using Authorization, open-promux automatically sends
 # `Authorization: Bearer <api_key>` unless api_key already starts with `Bearer `.
 # auth_header = "Authorization"
 
@@ -107,6 +137,23 @@ api_key = "sk-your-api-key"
 # max_concurrent_requests = 32
 # rpm = 300
 # tpm = 60000
+
+# ANTHROPIC MESSAGES UPSTREAM
+# -------------------------------------------
+[[upstreams]]
+
+# Requests can use model ids like `anthropic:claude-sonnet-4-5`.
+name = "anthropic"
+
+# Anthropic-compatible Messages API base URL.
+url = "https://api.anthropic.com/v1"
+
+# Anthropic uses x-api-key instead of Authorization.
+api_key = "sk-ant-your-api-key"
+auth_header = "x-api-key"
+
+# Convert OpenAI Responses API requests to Anthropic Messages API.
+api_format = "anthropic_messages"
 
 # CUSTOM OR LOCAL UPSTREAM
 # -------------------------------------------

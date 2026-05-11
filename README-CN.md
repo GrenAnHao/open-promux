@@ -1,430 +1,413 @@
-# OpenProxy
+<div align="center">
 
-OpenProxy 是一个面向 Codex App 用户的 Rust/Axum API 格式转换代理。它对 Codex App 暴露 OpenAI Responses API 兼容接口，同时把请求转发到 MIMO、DeepSeek V4 等 OpenAI-compatible Chat Completions 上游服务。
+# 🛰️ open-promux
 
-它解决的核心痛点是：很多模型服务已经提供 OpenAI 兼容的 `/chat/completions` 接口，但无法直接接入 Codex App。OpenProxy 会把 Codex App 的 `/v1/responses` 请求转换为上游 `/chat/completions` 请求，同时保留 `/v1/chat/completions` 直通代理，并支持 `/v1/models` 模型列表代理。
+**多上游 LLM API 网关 — 协议桥接、流量调度、模型融合，统一在一处。**
 
-## 热点功能速览
+`open-promux` 把多个模型服务（OpenAI 兼容、Anthropic Messages、未来更多协议……）聚合到同一个入口，按 model id 路由，并附带一个 Tauri 2 桌面控制台用于实时状态、日志流，以及（即将到来的）使用统计。
 
-| 功能 | 实现内容 | 价值 |
-| --- | --- | --- |
-| Codex App 兼容 | 将 Codex App 的 `/v1/responses` 流量转换到 OpenAI-compatible Chat Completions 上游 | 让 MIMO、DeepSeek V4 等无法直接接入 Codex App 的模型可无缝使用 |
-| Responses API 桥接 | 将 `/v1/responses` 转换为上游 Chat Completions | 让 Responses API 客户端直接使用只支持 Chat Completions 的上游 |
-| SSE 流式转换 | 将 Chat Completions SSE 转为 Responses API SSE 事件 | 保持流式输出、工具调用增量和完成事件兼容 |
-| 多上游模型路由 | 聚合 `/v1/models`，并根据请求 `model` 自动选择上游 | 一个 OpenAI 兼容入口管理多个模型提供方 |
-| 上游长连接复用 | 每个上游复用一个 reqwest client 和连接池 | 避免重复 TCP/TLS/代理建连开销 |
-| 负载均衡与故障转移 | 支持 first-match 或 round-robin 路由，并可开启自动故障转移 | 多个上游暴露同模型时提升可用性 |
-| RPM/TPM 与并发限流 | 支持可选全局和单上游请求、token、并发限制 | 默认不改变行为，同时保护上游不过载 |
-| 健康检查 | 定期检查上游 `/models`，并在路由时跳过不健康上游 | 避免流量继续打到不可用提供方 |
-| 工具调用适配 | 转换 tools、tool_choice 和流式工具调用参数 | 支持 agent/tool 工作流跨 API 格式运行 |
-| 重试与错误透传 | 对 403/429/5xx 自动重试，并保留上游错误 body | 提升稳定性，同时方便观察真实上游错误 |
-| OpenAI 兼容认证 | 默认发送 `Authorization: Bearer <api_key>` | 开箱兼容 OpenAI 风格上游，也支持自定义认证 header |
+[![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white)](https://tauri.app/)
+[![Axum](https://img.shields.io/badge/Axum-0.8-5BE7C4)](https://github.com/tokio-rs/axum)
+[![License](https://img.shields.io/badge/License-MIT-blue)](#license)
+[![English](https://img.shields.io/badge/Docs-English-blue)](./README.md)
 
-## 典型场景：Codex App + OpenAI 兼容模型服务
+</div>
 
-很多模型服务提供的是 OpenAI-compatible Chat Completions API，但 Codex App 需要 Responses API 协议。OpenProxy 可以作为中间转换层：
+---
+
+## ✨ 它是什么
 
 ```text
-Codex App -> OpenProxy /v1/responses -> MIMO / DeepSeek V4 / 其他 /chat/completions 上游
+┌────────────┐                    ┌─────────────────┐                      ┌──────────────┐
+│  任意 LLM  │                    │   open-promux   │   /chat/completions  │  OpenAI 兼容 │
+│  客户端：  │  /v1/responses     │                 │ ───────────────────► │  Anthropic   │
+│  Codex App │ ─────────────────► │  ┌───────────┐  │   /messages          │  本地 LLM    │
+│  Claude SDK│  /v1/messages      │  │ 路由 + LB │  │ ───────────────────► │  ……          │
+│  其他      │ ─────────────────► │  │ + 健康检查│  │   （即将更多）       │              │
+│            │  /v1/chat/...      │  └───────────┘  │                      │              │
+│            │ ─────────────────► │                 │                      │              │
+└────────────┘                    └─────────────────┘                      └──────────────┘
+                                            │
+                                            ▼
+                                    🖥️  Tauri 2 桌面控制台
+                                  （状态 / 日志 / 即将：用量统计）
 ```
 
-这样可以继续使用 Codex App，同时把实际模型后端切换到原本无法直接对接 Codex App 的模型服务。
+`open-promux` 起步是 Codex App ⇄ Chat Completions 的协议适配，
+现在正在演化为通用 LLM API 网关：
 
-在 Codex App 中，将 OpenAI-compatible base URL 指向 OpenProxy：
+- **协议桥接** — 当前支持 Responses API、Chat Completions、Anthropic Messages 互转，更多输出协议规划中。
+- **多上游路由** — 配多个供应商，按 model id 自动路由、错误时自动故障转移、流量负载均衡。
+- **模型融合** — 多家供应商的模型在同一个 catalog 下以 `name:model` 形式暴露。
+- **可观测性** — Tauri 2 桌面控制台带实时日志，即将集成参考 `cc-switch` 的按模型用量统计。
 
-```text
-http://127.0.0.1:8080/v1
-```
+---
 
-然后选择 OpenProxy `/v1/models` 返回的模型 ID，例如普通上游模型名，或 `deepseek:deepseek-v4` 这类带路由前缀的模型名。
+## 🔥 功能亮点
 
-## 功能特性
+| 类别 | 提供能力 |
+| --- | --- |
+| 🔁 **协议桥接** | `/v1/responses` ⇄ Chat Completions、原生 Anthropic Messages 输出、双向完整流式 SSE、工具调用翻译。 |
+| 🌐 **多上游 catalog** | 跨上游聚合 `/v1/models`，以 `name:model` 暴露 id，普通 id 原样转发。 |
+| ⚖️ **负载均衡** | 默认按配置顺序匹配，支持 `round_robin` 与可重试错误的自动故障转移。 |
+| 🧪 **健康检查** | 对每个上游周期性探测 `/models`，路由时跳过不健康上游直至恢复。 |
+| 🚦 **限流** | 可选全局与单上游 RPM / TPM / 并发限制，全部 opt-in。 |
+| 🛠️ **工具调用适配** | 跨格式翻译 `tools`、`tool_choice` 与流式参数增量。 |
+| ♻️ **重试与透传** | `403 / 429 / 5xx` 与连接错误自动重试（最多 3 次），其他错误原样透传上游 body。 |
+| 🔐 **灵活认证** | 默认 `Authorization: Bearer <key>`；支持 `api-key` 等自定义 header，每个上游独立配置。 |
+| 🖥️ **桌面控制台** | Tauri 2 应用，终端控制台风格，自带托盘、自启、虚拟滚动日志流、EN / 中 双语界面。 |
+| 📊 **用量统计（规划）** | 按模型 / 按上游的请求次数、token、延迟分布 — 详见 [路线图](#%EF%B8%8F-路线图)。 |
+| 🚀 **性能** | 每上游一个长连接 `reqwest` client，自动协商 HTTP/2，Tokio 多线程 runtime。 |
 
-- **Responses API 转 Chat Completions**
-  - 将 `/v1/responses` 请求转换为上游 Chat Completions 请求。
-  - 支持 `instructions` 转换为 system message。
-  - 支持字符串输入与完整 `input[]` 对话上下文。
-  - 保留 user、assistant、tool 等消息顺序。
-  - 支持 `max_output_tokens`、`temperature`、`top_p` 等常用参数转换。
+<details>
+<summary><strong>📚 完整功能列表（点击展开）</strong></summary>
 
-- **Chat Completions 转 Responses API**
-  - 将上游非流式 Chat Completions 响应转换为 Responses API 响应。
-  - 支持普通文本输出转换为 `message` output item。
-  - 支持 `tool_calls` 转换为 Responses API 的 `function_call` output item。
-  - 生成 Responses API 兼容的 response id、output、usage 和状态字段。
+### Responses API → Chat Completions
+- 将 `/v1/responses` 请求转为上游 Chat Completions 请求。
+- `instructions` 转为 system message。
+- 支持字符串输入与完整 `input[]` 对话上下文。
+- 保留 user / assistant / tool 等消息顺序。
+- 映射 `max_output_tokens`、`temperature`、`top_p` 等常用参数。
 
-- **完整 SSE 流式转换**
-  - 支持上游 Chat Completions SSE 流转换为 Responses API SSE 事件。
-  - 支持 `response.created`、`response.in_progress`、`response.output_item.added`、`response.output_text.delta`、`response.completed` 等事件。
-  - 内置 SSE 解码器，能正确处理 TCP 分片、半包、跨 chunk event。
-  - 支持中文、emoji 等多字节字符跨 chunk 分片时不损坏内容。
-  - 当上游直接发送 `[DONE]` 或连接关闭时，会兜底完成未结束的输出项。
+### Chat Completions → Responses API
+- 上游非流式响应转为 Responses API JSON。
+- 文本输出转为 `message` output item。
+- `tool_calls` 转为 `function_call` output item。
+- 生成 Responses 兼容的 response id、output、usage、status 字段。
 
-- **工具调用适配**
-  - 支持 Responses API `tools` 转 Chat Completions `tools`。
-  - 支持 Responses API function `tool_choice` 转 Chat Completions 兼容格式。
-  - 支持流式工具调用参数增量：`response.function_call_arguments.delta`。
-  - 支持工具调用完成事件：`response.function_call_arguments.done` 与 `response.output_item.done`。
+### 流式 SSE
+- 上游 Chat Completions SSE 转为 `response.created`、`response.in_progress`、`response.output_item.added`、`response.output_text.delta`、`response.completed` 等事件。
+- SSE 解码器正确处理 TCP 分片、半包、跨 chunk 事件。
+- 多字节安全（中文、emoji 等）— 字节断在字符中间也不损坏。
+- 上游直接发 `[DONE]` 或断连时兜底完成未结束输出项。
 
-- **错误重试与错误透传**
-  - 对上游 `403`、`429`、`5xx` 自动重试。
-  - 请求发送错误也会自动重试。
-  - 默认最多重试 3 次。
-  - 日志会明确输出每次尝试：`attempt 1/3`、`attempt 2/3`、`attempt 3/3`。
-  - 上游返回错误时，会透传状态码和响应 body，并在日志中输出上游错误内容。
+### 多上游路由
+- 同时兼容旧版 `[upstream]` 与新版 `[[upstreams]]` 配置。
+- `/v1/models` 聚合所有上游模型列表；带 `name` 时显示为 `name:model`。
+- 普通模型名原样转发；`name:model` 自动剥离前缀再发给对应上游。
+- 默认按配置顺序选第一个匹配上游；可选 `round_robin` 在同模型候选间轮转。
+- 可选自动故障转移：可重试错误后自动切下一个匹配上游。
+- 可选健康检查：路由时跳过不健康上游。
+- 多上游模式启动后预拉取模型列表并短时缓存，减少重复访问 `/models`。
 
-- **模型列表代理**
-  - 支持 `GET /v1/models`。
-  - 单上游模式下自动代理到上游 `{upstream.url}/models`。
-  - 多上游模式下自动聚合所有上游的模型列表。
-  - 同样支持认证、重试和错误 body 透传。
+### 性能与连接复用
+- 每个上游一个长生命周期 `reqwest` client + 连接池。
+- 上游支持时自动协商 HTTP/2 多路复用。
+- Tokio 多线程异步 runtime，不为每请求开线程。
+- 可选每上游并发上限：`[performance].upstream_max_concurrent_requests`。
+- 可选全局与单上游 RPM / TPM 限流，固定 60 秒窗口。
 
-- **多上游模型路由**
-  - 同时兼容旧版 `[upstream]` 和新版 `[[upstreams]]` 配置。
-  - `/v1/models` 会聚合所有上游模型列表。
-  - 支持给上游设置 `name`，模型列表显示为 `name:model`。
-  - `/v1/responses` 和 `/v1/chat/completions` 会根据请求里的 `model` 自动匹配上游。
-  - 普通模型名会原样转发给上游。
-  - 请求使用 `name:model` 时会路由到该上游，并在转发前还原为上游原始模型名。
-  - 如果多个上游暴露同名模型，默认按配置顺序选择第一个匹配项。
-  - 支持可选 `round_robin` 负载均衡，在同模型候选上游之间轮转。
-  - 支持可选自动故障转移，在可重试上游失败后切换到下一个匹配上游。
-  - 支持可选健康检查，路由时跳过不健康上游。
-  - 多上游模式启动后会预拉取模型列表，并短时间缓存以减少重复访问 `/models`。
+### 认证
+- `auth_header` 省略或为空 → 用标准 `Authorization`。
+- `Authorization` + 原始 key → 自动加 `Bearer ` 前缀。
+- key 已含 `Bearer ` 前缀时不重复添加。
+- 自定义 header（如 `api-key`）原样发送 `api_key` 值。
 
-- **性能与连接复用**
-  - 每个配置的上游会创建一个长生命周期 reqwest client。
-  - 通过 reqwest 连接池复用空闲 TCP/TLS/代理连接。
-  - 上游支持时可自动协商 HTTP/2 并使用多路复用。
-  - 使用 Tokio 多线程异步运行时，不为每个请求手动创建线程。
-  - 支持通过 `[performance].upstream_max_concurrent_requests` 配置每上游并发上限。
-  - 支持可选全局和单上游 RPM/TPM 限流。省略或设置为 `0` 表示关闭。
+</details>
 
-- **认证配置兼容**
-  - `auth_header` 省略或为空时，默认使用 OpenAI 标准 `Authorization`。
-  - 当 header 为 `Authorization` 且 `api_key` 未包含 `Bearer ` 前缀时，会自动发送 `Authorization: Bearer <api_key>`。
-  - 如果 `api_key` 已经是 `Bearer sk-xxx`，不会重复添加前缀。
-  - 自定义 header（如 `api-key`）时，会原样发送 `api_key`。
+---
 
-## 技术栈
+## 🗺️ 路线图
 
-- **语言**：Rust 2024 Edition
-- **异步运行时**：Tokio
-- **Web 框架**：Axum
-- **上游 HTTP 客户端**：Reqwest
-- **序列化**：Serde / serde_json
-- **流式处理**：SSE / futures
-- **配置文件**：TOML
-- **日志**：tracing / tracing-subscriber
-- **ID 生成**：UUID v4
+`open-promux` 正在从单一用途的 Codex 适配器扩展为通用网关。当前方向：
 
-## 快速开始
+| 阶段 | 内容 |
+| --- | --- |
+| **当前** | Responses ⇄ Chat Completions、Anthropic Messages 输出、流式 SSE、工具调用、多上游路由、负载均衡、健康检查、重试、Tauri 2 桌面控制台（双语 UI）。 |
+| **下一步** | 按模型 / 按上游的**用量统计**（请求次数、输入 / 输出 token、延迟 p50 / p95 / p99），思路参考 `cc-switch`。桌面 UI 中的快速切换上游配置。 |
+| **后续** | 更多输出协议（OpenAI Assistants、Gemini、Ollama 原生等）。成本核算、告警、请求重放、结构化审计日志。 |
 
-### 1. 安装
+如果有特别想优先做的功能，欢迎来提 issue。
 
-通过 npm 安装：
+---
+
+## 🚀 快速开始
+
+> 三种方式任选其一，底层都是同一个 Rust 内核。
+
+### 🟢 方式 A — npm（最推荐）
 
 ```bash
-npm install -g @grenanhao/openproxy
+npm install -g @grenanhao/open-promux
+open-promux ./config.toml
 ```
 
-运行已安装的 CLI：
+### 🟢 方式 B — Cargo（源码构建）
 
 ```bash
-openproxy ./config.toml
+git clone https://github.com/GrenAnHao/open-promux
+cd open-promux
+cargo run -- ./config.toml
 ```
 
-也可以从 GitHub Releases 下载原生二进制：
-
-```text
-https://github.com/GrenAnHao/openai-responses-proxy/releases
-```
-
-或者从源码编译：
+### 🟢 方式 C — 桌面控制台（Tauri 2）
 
 ```bash
-cargo build
+pnpm --dir desktop install
+pnpm --dir desktop dev          # 热重载开发窗口
+pnpm --dir desktop build        # 当前平台正式打包
 ```
 
-### 2. 配置
+桌面应用会从平台默认目录读写 `config.toml`：
+- Windows：`%APPDATA%\open-promux\`
+- Linux：`~/.config/open-promux/`
+- macOS：`~/Library/Application Support/open-promux/`
 
-默认读取项目根目录下的 `config.toml`。先从示例配置复制：
+如需共用 CLI 的 `./config.toml`，在 UI 里点击 **Set config path** 切换路径即可。
 
-```bash
-cp config.example.toml config.toml
-```
+> 💡 各平台预编译二进制也可在
+> [GitHub Releases](https://github.com/GrenAnHao/open-promux/releases) 直接下载。
 
-OpenAI 风格上游示例：
+---
+
+## 🖥️ 桌面控制台
+
+`desktop/` 目录下的 Tauri 2 前端把网关库直接嵌入同一个进程，不需要再开第二个终端：
+
+| 页面 | 能做什么 |
+| --- | --- |
+| **Dashboard** | 实时状态（绑定地址 / 在线时长 / 在线指示灯）、上游探测表。 |
+| **Upstreams** | 弹窗表单 CRUD：api_key、auth_header、weight、超时、proxy。 |
+| **Routing** | 负载均衡 / 健康 / 故障转移 / 模型别名规则。 |
+| **Logs** | 虚拟滚动日志流（每秒数千行也不卡顿），等级过滤、tail 开关、复制 / 清空。 |
+| **Settings** | 端口、auth_key、性能、健康、矫正器、自启动、语言。 |
+| **Stats** _(规划中)_ | 按模型 / 按上游的请求次数、token 用量、延迟。 |
+
+视觉风格：深碳底色（`#0B0F14`）+ 薄荷绿点缀（`#5BE7C4`），1px 边框，
+等宽数据标签。窗口关闭时缩进托盘，左键托盘重新聚焦。Windows 自启动
+写在用户级 Run 注册表项。
+
+双语：英文 / 简体中文，可在顶栏或 Settings 切换；选择持久化在网关
+配置旁边的 `desktop_preferences.toml` 文件中。
+
+---
+
+## ⚙️ 配置
+
+`open-promux` 默认从项目根目录读取 `config.toml`。建议从
+`config.example.toml` 起步，再按需求挑选下面的配置层级。
+
+### Tier 1 — 最小（单上游 OpenAI 风格）
 
 ```toml
-port = 8080
-auth_key = "proxy-secret"
+port     = 8080
+auth_key = "proxy-secret"          # 保护网关本身；省略表示禁用代理鉴权
 
 [upstream]
-url = "https://api.openai.com/v1"
+url     = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 ```
 
-上述配置会自动发送：
+向上游发送 `Authorization: Bearer sk-your-api-key`，
+向客户端要求 `Authorization: Bearer proxy-secret`。
 
-```http
-Authorization: Bearer sk-your-api-key
-```
-
-`auth_key` 用于保护 OpenProxy 代理端本身。设置后，客户端请求 `/v1/models`、`/v1/responses` 或 `/v1/chat/completions` 时必须携带：
-
-```http
-Authorization: Bearer proxy-secret
-```
-
-不设置 `auth_key` 时不会启用代理端鉴权。
-
-自定义认证 header 示例：
+### Tier 2 — 自定义认证 header
 
 ```toml
-port = 8080
-
 [upstream]
-url = "http://127.0.0.1:8000/v1"
-api_key = "your-secret"
-auth_header = "api-key"
+url         = "http://127.0.0.1:8000/v1"
+api_key     = "your-secret"
+auth_header = "api-key"            # 发送 `api-key: your-secret`，不加 Bearer
 ```
 
-上述配置会发送：
-
-```http
-api-key: your-secret
-```
-
-多上游自动路由示例：
+### Tier 3 — 多上游路由
 
 ```toml
 port = 8080
 
 [[upstreams]]
-name = "openai"
-url = "https://api.openai.com/v1"
+name    = "openai"
+url     = "https://api.openai.com/v1"
 api_key = "sk-your-api-key"
 
 [[upstreams]]
-name = "local"
-url = "http://127.0.0.1:8000/v1"
-api_key = "your-secret"
+name        = "local"
+url         = "http://127.0.0.1:8000/v1"
+api_key     = "your-secret"
 auth_header = "api-key"
 ```
 
-使用上述配置时，`GET /v1/models` 会返回合并后的模型列表，并显示类似 `openai:gpt-4.1-mini` 或 `local:qwen3` 的模型 id。请求 `/v1/responses` 或 `/v1/chat/completions` 时可以直接使用这些显示出来的 id；OpenProxy 会路由到对应上游，并在转发前去掉 `name:` 前缀。
+`GET /v1/models` 返回 `openai:gpt-4.1-mini`、`local:qwen3` 这样的模型 id。
+请求带这种前缀时会路由到对应上游，并在转发前剥离 `name:` 前缀。
 
-可选路由、健康检查和性能设置：
+### Tier 4 — 高级
 
 ```toml
 [performance]
 upstream_max_concurrent_requests = 64
-global_rpm = 600
-global_tpm = 120000
+global_rpm                       = 600
+global_tpm                       = 120000
 
 [routing]
-load_balance = "round_robin"
-automatic_failover = true
+load_balance        = "round_robin"
+automatic_failover  = true
 
 [health]
-enabled = true
-interval_millis = 30000
+enabled                  = true
+interval_millis          = 30000
 unhealthy_after_failures = 3
 ```
 
-设置后，并发限制会按上游请求占用槽位；流式响应会一直占用槽位直到流结束。RPM/TPM 使用固定 60 秒窗口。省略限流配置或设置为 `0` 表示关闭。
+并发限制每请求占用一个 slot，流式响应直到流结束才释放；
+RPM / TPM 限制使用固定 60 秒窗口。任何限制省略或设为 `0` 即关闭。
 
-### 3. 从源码运行
+### 配置参考表
 
-```bash
-cargo run
-```
+| 字段 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `port` | 否 | `8080` | 本地监听端口 |
+| `auth_key` | 否 | 空 | 客户端访问网关需要的 Bearer key；空表示禁用 |
+| `upstream.url` / `upstreams[].url` | 必选其一 | — | 上游 base URL，通常以 `/v1` 结尾 |
+| `upstream.api_key` / `upstreams[].api_key` | 否 | 空 | 上游认证 key |
+| `upstream.auth_header` / `upstreams[].auth_header` | 否 | `Authorization` | 上游认证 header 名 |
+| `upstreams[].name` | 否 | — | 路由前缀，生成 `name:model` |
+| `routing.load_balance` | 否 | `first_match` | `first_match` 或 `round_robin` |
+| `routing.automatic_failover` | 否 | `false` | 可重试错误后切下一个上游 |
+| `health.enabled` | 否 | `false` | 周期性探测每上游 `/models` |
+| `performance.*` | 否 | 未设 / `0` | 所有限流均 opt-in |
 
-也可以指定配置文件路径：
+---
 
-```bash
-cargo run -- ./config.toml
-```
+## 🔌 API
 
-启动后默认监听：
-
-```text
-0.0.0.0:8080
-```
-
-## 部署命令
-
-通过 npm 安装并运行：
-
-```bash
-npm install -g @grenanhao/openproxy
-openproxy ./config.toml
-```
-
-使用下载的 Release 二进制运行：
-
-```bash
-./openproxy ./config.toml
-```
-
-发布 GitHub Release：
-
-```bash
-git tag -a v0.1.0 -m "OpenProxy v0.1.0"
-git push origin v0.1.0
-```
-
-通过 GitHub Actions 发布 npm 包：
-
-```bash
-gh secret set NPM_TOKEN
-gh workflow run "Publish NPM" --ref master
-```
-
-`NPM_TOKEN` 必须是有权限发布 `@grenanhao/openproxy` 的 npm automation token。由于 GitHub Actions 创建 Release 时不会稳定触发另一个 release workflow，建议在 Release 成功后手动执行上面的 `gh workflow run` 命令发布 npm 包。
-
-## 接口说明
-
-### `POST /v1/responses`
-
-接收 Responses API 请求，转换为上游 Chat Completions 请求。
-
-非流式请求示例：
+### `POST /v1/responses` — Responses API ⇄ Chat Completions
 
 ```bash
 curl http://127.0.0.1:8080/v1/responses \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer proxy-secret" \
   -d '{
     "model": "gpt-4.1-mini",
-    "input": "你好，介绍一下你自己"
+    "input": "你好，请简单介绍下你自己"
   }'
 ```
 
-流式请求示例：
+流式、`instructions`、完整 `input[]` 多轮、工具调用 — 详见
+下方 [转换流程](#-转换流程)。
 
-```bash
-curl http://127.0.0.1:8080/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4.1-mini",
-    "stream": true,
-    "input": "请流式输出一段中文"
-  }'
-```
-
-完整上下文示例：
-
-```json
-{
-  "model": "gpt-4.1-mini",
-  "instructions": "你是一个简洁的助手。",
-  "input": [
-    {
-      "type": "message",
-      "role": "user",
-      "content": [{ "type": "input_text", "text": "你好" }]
-    },
-    {
-      "type": "message",
-      "role": "assistant",
-      "content": [{ "type": "output_text", "text": "你好，有什么可以帮你？" }]
-    },
-    {
-      "type": "message",
-      "role": "user",
-      "content": [{ "type": "input_text", "text": "继续上一个话题" }]
-    }
-  ]
-}
-```
-
-### `POST /v1/chat/completions`
-
-直通代理到上游 `{upstream.url}/chat/completions`。
-
-适合已经使用 Chat Completions 格式的客户端。多上游模式下会读取请求中的 `model` 并路由到匹配上游。
+### `POST /v1/chat/completions` — 直通代理
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4.1-mini",
-    "messages": [
-      { "role": "user", "content": "你好" }
-    ]
+    "messages": [{ "role": "user", "content": "你好" }]
   }'
 ```
 
-### `GET /v1/models`
+多上游模式下，请求里的 `model` 决定哪个上游接收请求。
+本路由适合已经用 Chat Completions 的客户端。
 
-代理上游模型列表。多上游模式下会聚合所有已配置上游的模型列表。
+### `GET /v1/models` — 合并模型列表
 
 ```bash
 curl http://127.0.0.1:8080/v1/models
 ```
 
-## 配置项
+单上游 → 直接代理 `{upstream.url}/models`。
+多上游 → 合并列表，`name` 存在时显示为 `name:model`。
 
-| 字段 | 必填 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `port` | 否 | `8080` | 本地监听端口 |
-| `upstream.url` | 旧版单上游配置必填 | 无 | 上游 API 基础地址，通常以 `/v1` 结尾 |
-| `upstream.api_key` | 否 | 空字符串 | 上游认证密钥 |
-| `upstream.auth_header` | 否 | `Authorization` | 上游认证 header 名；为空时也使用 `Authorization` |
-| `upstreams[].name` | 否 | 无 | 模型显示和路由前缀，会生成类似 `name:model` 的模型 id |
-| `upstreams[].url` | 多上游配置必填 | 无 | 单个上游的 API 基础地址 |
-| `upstreams[].api_key` | 否 | 空字符串 | 单个上游的认证密钥 |
-| `upstreams[].auth_header` | 否 | `Authorization` | 单个上游的认证 header 名 |
+---
 
-## 转换流程
+## 🧠 转换流程
 
-`/v1/responses` 的核心流程：
+```mermaid
+sequenceDiagram
+    participant C as 客户端 (Codex / Claude / …)
+    participant P as open-promux
+    participant U as 上游
 
-1. 解析客户端 Responses API 请求。
-2. 根据请求里的 `model` 查找暴露该模型的上游。
-3. 将 `instructions`、`input`、`tools`、`tool_choice` 等字段转换为 Chat Completions 兼容格式。
-4. 请求上游 `{upstream.url}/chat/completions`。
-5. 非流式响应：解析 Chat Completions JSON，转换为 Responses API JSON。
-6. 流式响应：解析上游 SSE，逐事件转换为 Responses API SSE。
-7. 上游错误：按规则重试，最终仍失败时透传状态码和错误 body。
+    C->>P: POST /v1/responses {model, input, tools, stream}
+    P->>P: 按 model id 解析上游
+    P->>P: 构造 Chat Completions 请求体
+    P->>U: POST /chat/completions
+    alt 流式
+        U-->>P: SSE chunks（文本 / 工具增量）
+        P-->>C: SSE 事件（response.output_text.delta、function_call_arguments.delta…）
+        U-->>P: [DONE]
+        P-->>C: response.completed
+    else 非流式
+        U-->>P: 200 OK ChatCompletion JSON
+        P-->>C: 200 OK Responses JSON
+    end
+    Note over P,U: 403/429/5xx → 最多重试 3 次<br/>最终失败时透传错误 body
+```
 
-## 开发命令
+`/v1/responses` 与 `/v1/chat/completions` 的路由决策：
+
+1. 解析请求并读取 `model`。
+2. 与每个上游公布的模型列表匹配（带短时缓存）。
+3. 必要时翻译请求体（Responses → Chat Completions / Anthropic Messages）。
+4. 用对应认证 header 转发到 `{upstream.url}/...`。
+5. 可重试错误 → 重试，必要时故障转移到下一个匹配上游。
+6. 流式 / 非流式响应分别翻译后返回。
+
+---
+
+## 🛠️ 开发
 
 ```bash
 cargo fmt --check
 cargo test
-cargo clippy -- -D warnings
+cargo clippy --workspace -- -D warnings
+
+# 桌面控制台
+pnpm --dir desktop typecheck
+pnpm --dir desktop build:renderer
 ```
 
-常用命令：
+**测试覆盖重点：**
+
+- Responses `input[]` 完整往返
+- `tools` / `tool_choice` 翻译
+- `tool_calls` → `function_call` 映射（流式与非流式）
+- SSE 半包 / 多字节字符处理
+- `[DONE]` 没带 `finish_reason` 时的兜底完成
+- 403 / 429 / 5xx 重试行为
+- 多上游 `/v1/models` 聚合
+- 按 `model` 自动选择上游
+- 默认 `Authorization: Bearer <api_key>` 语义
+
+---
+
+## 📦 发布
+
+打 GitHub Release：
 
 ```bash
-cargo fmt
-cargo run
-cargo test <test_name>
+git tag -a v0.2.0 -m "open-promux v0.2.0"
+git push origin v0.2.0
 ```
 
-## 当前测试覆盖
+通过 Actions 发布 npm 包：
 
-项目测试覆盖了以下关键场景：
+```bash
+gh secret set NPM_TOKEN
+gh workflow run "Publish NPM"
+```
 
-- Responses 输入上下文完整转换。
-- Responses tool/tool_choice 转 Chat Completions。
-- 非流式 tool_calls 转 Responses function_call。
-- 流式文本增量转换。
-- 流式工具调用参数 delta/done。
-- SSE 半包与多字节字符分片。
-- `[DONE]` 无 finish_reason 时兜底完成 output。
-- 403/429/5xx 重试。
-- `/v1/models` 代理与重试。
-- 多上游 `/v1/models` 聚合。
-- 根据请求模型自动路由到对应上游。
-- OpenAI 默认 `Authorization: Bearer <api_key>` 认证行为。
+`NPM_TOKEN` 需要是有 `@grenanhao/open-promux` 发布权限的 npm automation token。
 
-## 注意事项
+---
 
-- 不建议将真实 `api_key` 提交到版本控制。
-- 如果使用 OpenAI 标准认证，可以省略 `auth_header`。
-- 如果上游使用非标准认证 header，请显式配置 `auth_header`。
-- 只有 `403`、`429`、`5xx` 和请求发送错误会自动重试；`401` 通常代表认证失败，不会重试。
+## 📝 注意事项
+
+- **不要把真实的 `api_key` 提交到版本库。** `config.toml` 默认已加入 gitignore。
+- OpenAI 风格上游可省略 `auth_header`，自动用 `Authorization: Bearer`。
+- 上游若用非标准 header，请显式设置 `auth_header`（如 `api-key`）。
+- 只有 `403 / 429 / 5xx` 与连接错误会重试 — `401` 通常是鉴权失败，**不会**重试。
+- 本仓库取代了 `openai-responses-proxy`；旧名字仍可作为入口使用，但新功能将在这里继续推进。
+
+---
+
+## License
+
+MIT.
+
+<div align="center">
+
+由 🦀 Rust + ⚡ Axum + 🎨 Tauri 2 构建。
+
+</div>

@@ -4,11 +4,11 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const executable = process.platform === 'win32' ? 'openproxy.exe' : 'openproxy';
+const executable = process.platform === 'win32' ? 'open-promux.exe' : 'open-promux';
 const binaryPath = path.join(__dirname, '..', 'vendor', executable);
 
 if (!fs.existsSync(binaryPath)) {
-  console.error(`OpenProxy binary not found at ${binaryPath}. Try reinstalling the package.`);
+  console.error(`open-promux binary not found at ${binaryPath}. Try reinstalling the package.`);
   process.exit(1);
 }
 

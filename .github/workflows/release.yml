@@ -19,19 +19,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: openproxy-x86_64-unknown-linux-gnu.tar.gz
+            archive: open-promux-x86_64-unknown-linux-gnu.tar.gz
             exe: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: openproxy-x86_64-pc-windows-msvc.zip
+            archive: open-promux-x86_64-pc-windows-msvc.zip
             exe: ".exe"
           - os: macos-14
             target: x86_64-apple-darwin
-            archive: openproxy-x86_64-apple-darwin.tar.gz
+            archive: open-promux-x86_64-apple-darwin.tar.gz
             exe: ""
           - os: macos-14
             target: aarch64-apple-darwin
-            archive: openproxy-aarch64-apple-darwin.tar.gz
+            archive: open-promux-aarch64-apple-darwin.tar.gz
             exe: ""
 
     steps:
@@ -48,7 +48,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path package | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/openproxy${{ matrix.exe }}" "package/openproxy${{ matrix.exe }}"
+          Copy-Item "target/${{ matrix.target }}/release/open-promux${{ matrix.exe }}" "package/open-promux${{ matrix.exe }}"
           Copy-Item "config.example.toml" "package/config.example.toml"
           Copy-Item "README.md" "package/README.md"
           Copy-Item "README-CN.md" "package/README-CN.md"
@@ -89,5 +89,5 @@ jobs:
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" artifacts/* --clobber
           else
-            gh release create "$TAG_NAME" artifacts/* --title "OpenProxy $TAG_NAME" --generate-notes
+            gh release create "$TAG_NAME" artifacts/* --title "open-promux $TAG_NAME" --generate-notes
           fi

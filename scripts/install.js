@@ -8,7 +8,7 @@ const path = require('node:path');
 
 const packageJson = require('../package.json');
 
-const REPOSITORY = 'GrenAnHao/openai-responses-proxy';
+const REPOSITORY = 'GrenAnHao/open-promux';
 const VERSION = packageJson.version;
 const TAG = `v${VERSION}`;
 
@@ -18,29 +18,29 @@ function platformAsset() {
 
   if (platform === 'win32' && arch === 'x64') {
     return {
-      archive: 'openproxy-x86_64-pc-windows-msvc.zip',
-      binary: 'openproxy.exe',
+      archive: 'open-promux-x86_64-pc-windows-msvc.zip',
+      binary: 'open-promux.exe',
     };
   }
 
   if (platform === 'linux' && arch === 'x64') {
     return {
-      archive: 'openproxy-x86_64-unknown-linux-gnu.tar.gz',
-      binary: 'openproxy',
+      archive: 'open-promux-x86_64-unknown-linux-gnu.tar.gz',
+      binary: 'open-promux',
     };
   }
 
   if (platform === 'darwin' && arch === 'x64') {
     return {
-      archive: 'openproxy-x86_64-apple-darwin.tar.gz',
-      binary: 'openproxy',
+      archive: 'open-promux-x86_64-apple-darwin.tar.gz',
+      binary: 'open-promux',
     };
   }
 
   if (platform === 'darwin' && arch === 'arm64') {
     return {
-      archive: 'openproxy-aarch64-apple-darwin.tar.gz',
-      binary: 'openproxy',
+      archive: 'open-promux-aarch64-apple-darwin.tar.gz',
+      binary: 'open-promux',
     };
   }
 
@@ -127,14 +127,14 @@ async function main() {
   const asset = platformAsset();
   const packageRoot = path.resolve(__dirname, '..');
   const vendorDir = path.join(packageRoot, 'vendor');
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openproxy-'));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'open-promux-'));
   const archivePath = path.join(tempDir, asset.archive);
   const extractDir = path.join(tempDir, 'extract');
   const downloadUrl = `https://github.com/${REPOSITORY}/releases/download/${TAG}/${asset.archive}`;
 
   fs.mkdirSync(vendorDir, { recursive: true });
 
-  console.log(`Downloading OpenProxy ${TAG} from ${downloadUrl}`);
+  console.log(`Downloading open-promux ${TAG} from ${downloadUrl}`);
   await downloadWithRetries(downloadUrl, archivePath);
   extract(archivePath, extractDir);
 
@@ -152,7 +152,7 @@ async function main() {
   }
 
   fs.rmSync(tempDir, { recursive: true, force: true });
-  console.log(`Installed OpenProxy binary to ${targetBinary}`);
+  console.log(`Installed open-promux binary to ${targetBinary}`);
 }
 
 main().catch((error) => {

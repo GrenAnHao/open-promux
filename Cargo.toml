@@ -1,7 +1,19 @@
+[workspace]
+members = [".", "desktop/src-tauri"]
+resolver = "2"
+
 [package]
-name = "openproxy"
+name = "open-promux"
 version = "0.2.0"
 edition = "2024"
+
+[lib]
+name = "open_promux"
+path = "src/lib.rs"
+
+[[bin]]
+name = "open-promux"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
