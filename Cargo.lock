@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "open-promux"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "futures",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "open-promux-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dirs 5.0.1",
  "open-promux",

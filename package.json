@@ -1,6 +1,6 @@
 {
   "name": "@grenanhao/open-promux",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "open-promux: multi-upstream LLM API gateway with protocol bridging, load balancing, model fusion, and a Tauri 2 desktop console.",
   "bin": {
     "open-promux": "bin/open-promux.js"
