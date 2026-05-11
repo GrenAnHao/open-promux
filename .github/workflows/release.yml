@@ -131,14 +131,20 @@ jobs:
         shell: bash
         run: |
           mkdir -p desktop-artifacts
-          shopt -s nullglob globstar
-          for f in desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.{msi,exe,dmg,deb,AppImage,rpm}; do
-            cp "$f" desktop-artifacts/ || true
-          done
-          # Also pick up the universal .app.tar.gz on macOS
-          for f in desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz; do
-            cp "$f" desktop-artifacts/ || true
-          done
+          # Tauri builds into the workspace root `target/` because we share
+          # the Cargo workspace between the proxy lib and desktop crate.
+          BUNDLE_ROOT="target/${{ matrix.target }}/release/bundle"
+          if [ ! -d "$BUNDLE_ROOT" ]; then
+            BUNDLE_ROOT="desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          fi
+          echo "Bundle root: $BUNDLE_ROOT"
+          ls -R "$BUNDLE_ROOT" || true
+          # macOS 3.2 doesn't support globstar; use find for portability.
+          find "$BUNDLE_ROOT" -type f \
+            \( -name "*.msi" -o -name "*.exe" -o -name "*.dmg" \
+            -o -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \
+            -o -name "*.app.tar.gz" \) \
+            -exec cp {} desktop-artifacts/ \;
           ls -la desktop-artifacts/
 
       - name: Upload desktop artifacts
