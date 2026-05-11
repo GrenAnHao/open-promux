@@ -57,7 +57,8 @@
 | ♻️ **重试与透传** | `403 / 429 / 5xx` 与连接错误自动重试（最多 3 次），其他错误原样透传上游 body。 |
 | 🔐 **灵活认证** | 默认 `Authorization: Bearer <key>`；支持 `api-key` 等自定义 header，每个上游独立配置。 |
 | 🖥️ **桌面控制台** | Tauri 2 应用，终端控制台风格，自带托盘、自启、虚拟滚动日志流、EN / 中 双语界面。 |
-| 📊 **用量统计（规划）** | 按模型 / 按上游的请求次数、token、延迟分布 — 详见 [路线图](#%EF%B8%8F-路线图)。 |
+| � **Anthropic 下游** | `/v1/messages` 接收 Anthropic Messages 请求；Anthropic 上游直通、Chat Completions 上游转换（当前仅非流式）。 |
+| �📊 **流量统计（进行中）** | 按模型 / 按上游的请求次数、token、延迟分布 — 详见 [路线图](#%EF%B8%8F-路线图)。 |
 | 🚀 **性能** | 每上游一个长连接 `reqwest` client，自动协商 HTTP/2，Tokio 多线程 runtime。 |
 
 <details>
@@ -114,8 +115,8 @@
 
 | 阶段 | 内容 |
 | --- | --- |
-| **当前** | Responses ⇄ Chat Completions、Anthropic Messages 输出、流式 SSE、工具调用、多上游路由、负载均衡、健康检查、重试、Tauri 2 桌面控制台（双语 UI）。 |
-| **下一步** | 按模型 / 按上游的**用量统计**（请求次数、输入 / 输出 token、延迟 p50 / p95 / p99），思路参考 `cc-switch`。桌面 UI 中的快速切换上游配置。 |
+| **当前** | Responses ⇄ Chat Completions、Anthropic Messages **上游 + 下游**（`/v1/messages`）、流式 SSE、工具调用、多上游路由、负载均衡、健康检查、重试、Tauri 2 桌面控制台（双语 UI）。 |
+| **下一步** | 按模型 / 按上游的**流量统计**（请求次数、输入 / 输出 token、延迟 p50 / p95 / p99），思路参考 `cc-switch`。`/v1/messages` 对接 Chat Completions 上游的 SSE 桥接。桌面 UI 中的快速切换上游配置。 |
 | **后续** | 更多输出协议（OpenAI Assistants、Gemini、Ollama 原生等）。成本核算、告警、请求重放、结构化审计日志。 |
 
 如果有特别想优先做的功能，欢迎来提 issue。
@@ -172,7 +173,7 @@ pnpm --dir desktop build        # 当前平台正式打包
 | **Routing** | 负载均衡 / 健康 / 故障转移 / 模型别名规则。 |
 | **Logs** | 虚拟滚动日志流（每秒数千行也不卡顿），等级过滤、tail 开关、复制 / 清空。 |
 | **Settings** | 端口、auth_key、性能、健康、矫正器、自启动、语言。 |
-| **Stats** _(规划中)_ | 按模型 / 按上游的请求次数、token 用量、延迟。 |
+| **Stats** _(进行中)_ | 按模型 / 按上游的流量统计：请求次数、token 用量、延迟。 |
 
 视觉风格：深碳底色（`#0B0F14`）+ 薄荷绿点缀（`#5BE7C4`），1px 边框，
 等宽数据标签。窗口关闭时缩进托盘，左键托盘重新聚焦。Windows 自启动
@@ -285,6 +286,28 @@ curl http://127.0.0.1:8080/v1/responses \
 
 流式、`instructions`、完整 `input[]` 多轮、工具调用 — 详见
 下方 [转换流程](#-转换流程)。
+
+### `POST /v1/messages` — Anthropic Messages 下游
+
+```bash
+curl http://127.0.0.1:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer proxy-secret" \
+  -d '{
+    "model": "claude-3-5-sonnet-latest",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ]
+  }'
+```
+
+路由矩阵：
+
+| 上游 `api_format` | 行为 |
+| --- | --- |
+| `anthropic_messages` | 直通转发；完整流式 SSE + rectifier + 重试。 |
+| `chat_completions` | Anthropic ⇄ Chat 转换（当前仅非流式；流式返回 `501`，并提示使用已双向支持的 `/v1/responses`）。 |
 
 ### `POST /v1/chat/completions` — 直通代理
 

@@ -2624,3 +2624,165 @@ async fn models_should_make_initial_request_then_retry_three_times_and_return_fi
         json!({"error": "upstream failed"})
     );
 }
+
+// ── /v1/messages (Anthropic Messages downstream protocol) ──
+
+fn anthropic_messages_request(stream: bool) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "model": "claude-test",
+                "max_tokens": 256,
+                "stream": stream,
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ]
+            }))
+            .unwrap(),
+        ))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn messages_should_passthrough_to_anthropic_messages_upstream() {
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
+    let app = Router::new().route(
+        "/messages",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                Json(json!({
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-test",
+                    "content": [{"type": "text", "text": "Hi back"}],
+                    "stop_reason": "end_turn"
+                }))
+            }
+        }),
+    );
+    let config = test_app_state(Config {
+        port: 0,
+        auth_key: None,
+        performance: crate::config::PerformanceConfig::default(),
+        routing: crate::config::RoutingConfig::default(),
+        health: crate::config::HealthConfig::default(),
+        rectifier: crate::config::RectifierConfig::default(),
+        upstream: Some(crate::config::UpstreamConfig {
+            name: None,
+            url: spawn_upstream(app).await,
+            api_key: "anthropic-key".into(),
+            auth_header: "x-api-key".into(),
+            proxy: None,
+            proxy_type: crate::config::UpstreamProxyType::Http,
+            api_format: crate::config::UpstreamApiFormat::AnthropicMessages,
+            max_concurrent_requests: None,
+            rpm: None,
+            tpm: None,
+        }),
+        upstreams: Vec::new(),
+    });
+
+    let resp = messages(State(config), anthropic_messages_request(false)).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["role"], "assistant");
+    assert_eq!(body["content"][0]["text"], "Hi back");
+
+    let seen = seen.lock().await.clone().unwrap();
+    assert_eq!(seen["model"], "claude-test");
+    assert_eq!(seen["messages"][0]["role"], "user");
+    assert_eq!(seen["messages"][0]["content"], "Hello");
+}
+
+#[tokio::test]
+async fn messages_should_translate_anthropic_request_to_chat_completions_upstream() {
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
+    let app = Router::new().route(
+        "/chat/completions",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                Json(json!({
+                    "id": "chatcmpl_1",
+                    "model": "claude-test",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "Hello from chat"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 5,
+                        "completion_tokens": 3,
+                        "total_tokens": 8
+                    }
+                }))
+            }
+        }),
+    );
+    let config = test_config(spawn_upstream(app).await);
+
+    let resp = messages(State(config), anthropic_messages_request(false)).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    // Anthropic-shaped response
+    assert_eq!(body["type"], "message");
+    assert_eq!(body["role"], "assistant");
+    assert_eq!(body["content"][0]["type"], "text");
+    assert_eq!(body["content"][0]["text"], "Hello from chat");
+    assert_eq!(body["stop_reason"], "end_turn");
+    assert_eq!(body["usage"]["input_tokens"], 5);
+    assert_eq!(body["usage"]["output_tokens"], 3);
+
+    // Chat upstream saw an OpenAI-shaped request
+    let seen = seen.lock().await.clone().unwrap();
+    assert_eq!(seen["model"], "claude-test");
+    assert_eq!(seen["messages"][0]["role"], "user");
+    assert_eq!(seen["messages"][0]["content"], "Hello");
+}
+
+#[tokio::test]
+async fn messages_should_reject_streaming_with_chat_completions_upstream() {
+    // No upstream call expected; the endpoint should short-circuit with 501.
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            // If we ever reach the upstream the test fails.
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "should not have been called",
+            )
+        }),
+    );
+    let config = test_config(spawn_upstream(app).await);
+
+    let resp = messages(State(config), anthropic_messages_request(true)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("Streaming"));
+    assert!(text.contains("anthropic_messages"));
+}

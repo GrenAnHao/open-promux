@@ -125,6 +125,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(proxy::models))
         .route("/v1/chat/completions", post(proxy::chat_completions))
         .route("/v1/responses", post(proxy::responses))
+        .route("/v1/messages", post(proxy::messages))
         .with_state(state)
 }
 

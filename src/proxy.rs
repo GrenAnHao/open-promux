@@ -282,12 +282,14 @@ impl FixedWindowRateLimiter {
 }
 
 mod chat;
+mod messages;
 mod models;
 mod rectifier;
 mod responses;
 mod support;
 
 pub use chat::chat_completions;
+pub use messages::messages;
 pub use models::models;
 use rectifier::*;
 pub use responses::responses;

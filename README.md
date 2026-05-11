@@ -57,7 +57,8 @@ evolving into a general-purpose LLM gateway:
 | ♻️ **Retry & passthrough** | Auto-retries `403 / 429 / 5xx` and connection errors (3 attempts), preserves upstream error bodies otherwise. |
 | 🔐 **Flexible auth** | Defaults to `Authorization: Bearer <key>`; custom header names like `api-key` supported per upstream. |
 | 🖥️ **Desktop console** | Tauri 2 app with terminal-console aesthetic, system tray, autostart, virtualised log stream, EN/中 bilingual UI. |
-| 📊 **Usage analytics (planned)** | Per-model / per-upstream call counts, tokens, latency histograms — see [Roadmap](#-roadmap). |
+| � **Anthropic downstream** | `/v1/messages` accepts Anthropic Messages requests; passes through to Anthropic upstreams or translates to Chat Completions upstreams (non-streaming today). |
+| 📊 **Traffic stats (in progress)** | Per-model / per-upstream call counts, tokens, latency histograms — see [Roadmap](#%EF%B8%8F-roadmap). |
 | 🚀 **Performance** | Long-lived `reqwest` clients per upstream, HTTP/2 multiplexing when available, Tokio multi-thread runtime. |
 
 <details>
@@ -115,8 +116,8 @@ gateway. Current direction:
 
 | Tier | Items |
 | --- | --- |
-| **Now** | Responses ⇄ Chat Completions, Anthropic Messages output, streaming SSE, tool calls, multi-upstream routing, load balancing, health, retry, Tauri 2 desktop console (with bilingual UI). |
-| **Next** | Per-model / per-upstream **usage statistics** (calls, tokens in/out, latency p50/p95/p99) inspired by `cc-switch`. Quick-switch upstream profiles in the desktop UI. |
+| **Now** | Responses ⇄ Chat Completions, Anthropic Messages **upstream + downstream** (`/v1/messages`), streaming SSE, tool calls, multi-upstream routing, load balancing, health, retry, Tauri 2 desktop console (bilingual UI). |
+| **Next** | Per-model / per-upstream **traffic stats** (calls, tokens in/out, latency p50/p95/p99) inspired by `cc-switch`. SSE bridge for `/v1/messages` against Chat Completions upstreams. Quick-switch upstream profiles in the desktop UI. |
 | **Later** | Additional output protocols (OpenAI Assistants, Gemini, Ollama native, …). Cost tracking, alerts, request replay, structured audit log. |
 
 Open an issue if you want to nudge the priority of something here.
@@ -172,7 +173,7 @@ process so you never need a second terminal:
 | **Routing** | Load balance, health, failover, model-alias rules. |
 | **Logs** | Virtualised log stream (handles thousands of lines/sec); level filter, tail toggle, copy / clear. |
 | **Settings** | Port, auth_key, performance, health, rectifier, autostart, language. |
-| **Stats** _(planned)_ | Per-model / per-upstream call counts, tokens, latency. |
+| **Stats** _(in progress)_ | Per-model / per-upstream traffic stats: call counts, tokens, latency. |
 
 Visual identity: deep-carbon palette (`#0B0F14`) with mint accent (`#5BE7C4`),
 1px borders, monospace data labels. Window close hides to tray; left-click
@@ -287,6 +288,28 @@ curl http://127.0.0.1:8080/v1/responses \
 
 Streaming, instructions, full `input[]` history, tool calls — see
 [How the conversion works](#-how-the-conversion-works) below.
+
+### `POST /v1/messages` — Anthropic Messages downstream
+
+```bash
+curl http://127.0.0.1:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer proxy-secret" \
+  -d '{
+    "model": "claude-3-5-sonnet-latest",
+    "max_tokens": 1024,
+    "messages": [
+      {"role": "user", "content": "Hi"}
+    ]
+  }'
+```
+
+Routing matrix:
+
+| Upstream `api_format` | Behaviour |
+| --- | --- |
+| `anthropic_messages` | Direct passthrough; full streaming SSE + rectifier + retry. |
+| `chat_completions` | Anthropic ⇄ Chat translation (non-streaming today; streaming returns `501` with a pointer to `/v1/responses`, which already supports both directions). |
 
 ### `POST /v1/chat/completions` — direct passthrough
 
