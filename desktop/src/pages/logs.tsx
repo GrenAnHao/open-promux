@@ -119,11 +119,11 @@ export function LogsPage() {
               {t("logs.tail")}
             </Button>
             <Button size="sm" variant="ghost" onClick={() => void copyAll()}>
-              <Copy className="h-3.5 w-3.5" />
+              <Copy className="size-3.5" />
               {t("logs.copy")}
             </Button>
             <Button size="sm" variant="danger" onClick={() => void clear()}>
-              <Eraser className="h-3.5 w-3.5" />
+              <Eraser className="size-3.5" />
               {t("logs.clear")}
             </Button>
           </>
@@ -131,7 +131,7 @@ export function LogsPage() {
       >
         <div
           ref={scrollRef}
-          className="scrollbar-thin flex-1 overflow-y-auto bg-carbon-900/50"
+          className="scrollbar-thin flex-1 overflow-y-auto bg-carbon-900/50 px-4"
           onScroll={(e) => {
             const { scrollTop, scrollHeight, clientHeight } =
               e.currentTarget;
@@ -149,7 +149,7 @@ export function LogsPage() {
               // virtualizer mounts a small slice of <li>s positioned
               // absolutely inside this spacer.
               style={{ height: virtualizer.getTotalSize(), position: "relative" }}
-              className="px-3 py-2 font-mono text-[12px] leading-[1.55]"
+              className="py-2 font-mono text-[12px] leading-[1.55]"
             >
               {virtualizer.getVirtualItems().map((virtualRow) => {
                 const line = filtered[virtualRow.index];

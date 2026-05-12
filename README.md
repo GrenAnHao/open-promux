@@ -61,6 +61,10 @@ evolving into a general-purpose LLM gateway:
 | 🌀 **Responses upstream** | `api_format = "responses"` lets the upstream itself speak the Responses API; `/v1/responses` becomes a clean passthrough (full streaming SSE), `/v1/messages` / `/v1/chat/completions` translate. |
 | 📊 **Traffic stats** | Per-model / per-upstream live counters: requests / success / error / bytes in & out / latency avg & max. Visible in the desktop Stats tab. |
 | 🚀 **Performance** | Long-lived `reqwest` clients per upstream, HTTP/2 multiplexing when available, Tokio multi-thread runtime. |
+| 🧭 **Listen scope** | Settings panel exposes a **Local / Global** segmented radio with an info tooltip: `127.0.0.1` keeps the proxy loopback-only, `0.0.0.0` opens it up to the LAN. |
+| 🪪 **Downstream API panel** | Dashboard surfaces the base URL plus the three client endpoints (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`) with one-click copy. Wildcard binds (`0.0.0.0`) collapse to a usable loopback for display. |
+| 🩺 **Debug panel** | Opt-in "Debug" section in Settings: pick a tracing log level (takes effect on next launch), persist every inbound conversation to `./debug/conversation-*.json`, and open the debug directory in one click. Disabled by default — a clearly-labelled info tooltip warns that enabling it writes prompt content to disk. |
+| 🌈 **Colour-coded toasts** | Success / info / warning / error / loading toasts each use a themed icon and border (mint / sky / amber / coral / ink), so the outcome of an action is obvious at a glance. |
 
 <details>
 <summary><strong>📚 Detailed feature list (click to expand)</strong></summary>
@@ -169,11 +173,11 @@ process so you never need a second terminal:
 
 | Page | Does |
 | --- | --- |
-| **Dashboard** | Live status (bind / uptime / online indicator), per-upstream probe table. |
-| **Upstreams** | CRUD with dialog form; api_key, auth_header, weight, timeouts, proxy. |
+| **Dashboard** | Live status (bind / uptime / online indicator). Upstream table with one row per upstream: format, health badge, inline model dropdown, refresh and chat-probe buttons. Model lists are cached across tab switches — switching away and back never re-queries upstream `/v1/models`; only the refresh button does. Probe outcomes surface as toasts. A dedicated **Downstream APIs** panel prints the gateway's base URL plus `/v1/chat/completions`, `/v1/responses`, `/v1/messages` with one-click copy. Panel fills the viewport with its own vertical/horizontal scroll, so the table never drags the whole page width. |
+| **Upstreams** | CRUD with dialog form; `api_format` supports `chat_completions`, `anthropic_messages`, and `responses`. Also exposes api_key, auth_header, proxy + proxy type, per-upstream concurrency / RPM / TPM. Table fills the viewport with its own scroll. |
 | **Routing** | Load balance, health, failover, model-alias rules. |
 | **Logs** | Virtualised log stream (handles thousands of lines/sec); level filter, tail toggle, copy / clear. |
-| **Settings** | Port, auth_key, performance, health, rectifier, autostart, language. |
+| **Settings** | **Listen scope** (Local `127.0.0.1` / Global `0.0.0.0`, with an info tooltip), port, auth_key, performance, health, rectifier, **Debug** (log level + persist conversations + open debug dir), autostart, language. |
 | **Stats** | Per-model / per-upstream traffic stats: call counts, tokens, latency. |
 
 Visual identity: deep-carbon palette (`#0B0F14`) with mint accent (`#5BE7C4`),
@@ -182,6 +186,22 @@ tray re-focuses. Auto-start on Windows uses the user-level Run registry key.
 
 Bilingual: English / 简体中文, switchable from the top bar or Settings.
 Choice persists in `desktop_preferences.toml` next to the gateway config.
+
+### Screenshots
+
+<div align="center">
+
+| Dashboard · System + Upstreams | Dashboard · Downstream APIs |
+| :---: | :---: |
+| ![Dashboard overview 1](./images/概览1.png) | ![Dashboard overview 2](./images/概览2.png) |
+| **Upstreams list** | **Add / edit upstream** |
+| ![Upstreams list](./images/上游管理.png) | ![Add upstream dialog](./images/新增上游.png) |
+| **Routing** | **Settings** |
+| ![Routing](./images/路由配置.png) | ![Settings](./images/设置.png) |
+| **Stats** | **Logs** |
+| ![Stats](./images/流量统计.png) | ![Logs](./images/日志.png) |
+
+</div>
 
 ---
 
@@ -265,6 +285,7 @@ hold the slot until the stream finishes. RPM / TPM limits use a fixed
 | `upstream.url` / `upstreams[].url` | Yes (one of) | — | Upstream base URL, usually ending in `/v1` |
 | `upstream.api_key` / `upstreams[].api_key` | No | empty | Upstream key |
 | `upstream.auth_header` / `upstreams[].auth_header` | No | `Authorization` | Upstream auth header name |
+| `upstream.api_format` / `upstreams[].api_format` | No | `chat_completions` | One of `chat_completions`, `anthropic_messages`, `responses` |
 | `upstreams[].name` | No | — | Routing prefix; produces ids like `name:model` |
 | `routing.load_balance` | No | `first_match` | `first_match` or `round_robin` |
 | `routing.automatic_failover` | No | `false` | Retry next upstream after retryable errors |
@@ -310,8 +331,8 @@ curl http://127.0.0.1:8080/v1/messages \
 | Upstream `api_format` | Behaviour |
 | --- | --- |
 | `anthropic_messages` | Direct passthrough; full streaming SSE + rectifier + retry. |
-| `chat_completions` | Anthropic ⇄ Chat translation (non-streaming today; streaming returns `501` with a pointer to `/v1/responses`, which already supports both directions). |
-| `responses` | Anthropic ⇄ Responses translation (non-streaming today; streaming returns `501`). |
+| `chat_completions` | Anthropic ⇄ Chat translation; supports streaming and non-streaming. |
+| `responses` | Anthropic ⇄ Responses translation; supports streaming and non-streaming. |
 
 ### "Any-to-any" matrix
 
@@ -320,8 +341,8 @@ The full matrix of downstream protocols × upstream `api_format` values:
 | Downstream ↓ \ Upstream → | `chat_completions` | `anthropic_messages` | `responses` |
 | --- | --- | --- | --- |
 | `/v1/responses` | ✅ stream + non-stream | ✅ stream + non-stream | ✅ stream + non-stream **passthrough** |
-| `/v1/messages` | ✅ non-stream (`501` for stream) | ✅ stream + non-stream **passthrough** | ✅ non-stream (`501` for stream) |
-| `/v1/chat/completions` | ✅ stream + non-stream **passthrough** | ✅ non-stream (`501` for stream) | ✅ non-stream (`501` for stream) |
+| `/v1/messages` | ✅ stream + non-stream | ✅ stream + non-stream **passthrough** | ✅ stream + non-stream |
+| `/v1/chat/completions` | ✅ stream + non-stream **passthrough** | ✅ stream + non-stream | ✅ stream + non-stream |
 
 **TL;DR**: pick the downstream that fits your client; pick the upstream
 `api_format` that matches the provider; the gateway handles translation

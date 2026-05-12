@@ -40,8 +40,6 @@ i18n
     },
   });
 
-export default i18n;
-
 /**
  * Hydrate from the Rust-side preferences file. Called from `main.tsx`
  * before the React tree mounts so the first paint already shows the

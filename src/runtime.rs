@@ -182,22 +182,40 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<ServerHandle, Ser
 /// first positional argument (or `config.toml` by default), and runs the
 /// server until the process is terminated.
 pub async fn run_cli() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let config_path: PathBuf = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config.toml".into())
         .into();
 
+    // Peek the config before initialising tracing so the user's chosen
+    // `debug.log_level` takes effect on process start. `RUST_LOG` still
+    // wins when set, matching the convention every other tracing-based
+    // Rust tool uses.
+    let level_hint = Config::load_path(&config_path)
+        .ok()
+        .filter(|c| c.debug.enabled)
+        .map(|c| c.debug.log_level.as_str().to_string())
+        .unwrap_or_else(|| "info".to_string());
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&level_hint)),
+        )
+        .init();
+
     tracing::info!("loading config from {}", config_path.display());
     let config = Config::load(&config_path);
     let port = config.port;
+    let host: IpAddr = config.host.parse().unwrap_or_else(|err| {
+        tracing::warn!(
+            "invalid host `{}` in config ({}); falling back to 0.0.0.0",
+            config.host,
+            err
+        );
+        IpAddr::from([0, 0, 0, 0])
+    });
 
-    let addr = SocketAddr::new(IpAddr::from([0, 0, 0, 0]), port);
+    let addr = SocketAddr::new(host, port);
     tracing::info!("open-promux listening on {addr}");
 
     let handle = match serve(addr, config).await {

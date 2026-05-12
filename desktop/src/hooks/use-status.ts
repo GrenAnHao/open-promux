@@ -22,15 +22,14 @@ export function useStatus() {
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
+      let next: ServerStatus = { running: false, uptime_seconds: 0 };
       try {
-        const next = await api.getStatus();
-        if (!cancelled) setStatus(next);
+        next = await api.getStatus();
       } catch {
-        if (!cancelled) {
-          setStatus({ running: false, uptime_seconds: 0 });
-        }
+        next = { running: false, uptime_seconds: 0 };
       }
       if (!cancelled) {
+        setStatus(next);
         timer = setTimeout(poll, POLL_INTERVAL_MS);
       }
     };

@@ -1,4 +1,13 @@
-import { Pause, Play, Terminal } from "lucide-react";
+import {
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
+  Info,
+  Loader2,
+  Pause,
+  Play,
+  Terminal,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Toaster, toast } from "sonner";
@@ -9,7 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStatus } from "@/hooks/use-status";
 import { api } from "@/lib/api";
 import type { RuntimeInfo } from "@/lib/types";
-import { cn, formatUptime } from "@/lib/utils";
+import { cn, formatUptime, resolveDisplayAddress } from "@/lib/utils";
 import { DashboardPage } from "@/pages/dashboard";
 import { LogsPage } from "@/pages/logs";
 import { RoutingPage } from "@/pages/routing";
@@ -80,7 +89,7 @@ function App() {
           <TabsContent value="dashboard">
             <DashboardPage status={status} runtime={runtime} onRefresh={refresh} />
           </TabsContent>
-          <TabsContent value="upstreams">
+          <TabsContent value="upstreams" className="flex h-full min-h-0 flex-col">
             <UpstreamsPage />
           </TabsContent>
           <TabsContent value="routing">
@@ -89,7 +98,7 @@ function App() {
           <TabsContent value="stats">
             <StatsPage />
           </TabsContent>
-          <TabsContent value="logs" className="flex flex-1 min-h-0 flex-col">
+          <TabsContent value="logs" className="flex h-full min-h-0 flex-col">
             <LogsPage />
           </TabsContent>
           <TabsContent value="settings">
@@ -102,6 +111,13 @@ function App() {
         position="bottom-right"
         theme="dark"
         toastOptions={{
+          classNames: {
+            toast:
+              "font-mono text-[12px] border shadow-glow data-[type=success]:border-mint-400/60 data-[type=success]:bg-mint-600/15 data-[type=success]:text-mint-200 data-[type=error]:border-coral-400/60 data-[type=error]:bg-coral-500/10 data-[type=error]:text-coral-400 data-[type=warning]:border-amber-400/60 data-[type=warning]:bg-amber-500/10 data-[type=warning]:text-amber-400 data-[type=info]:border-sky-300/60 data-[type=info]:bg-sky-300/10 data-[type=info]:text-sky-300 data-[type=loading]:border-ink-500 data-[type=loading]:bg-carbon-700 data-[type=loading]:text-ink-200",
+            title: "font-mono",
+            description: "font-mono text-ink-300",
+            closeButton: "border-carbon-400 bg-carbon-800 text-ink-200",
+          },
           style: {
             background: "#11161D",
             border: "1px solid #2A3340",
@@ -109,6 +125,13 @@ function App() {
             fontFamily: "JetBrains Mono, ui-monospace, Consolas, monospace",
             borderRadius: 0,
           },
+        }}
+        icons={{
+          success: <CheckCircle2 className="size-4 text-mint-300" />,
+          info: <Info className="size-4 text-sky-300" />,
+          warning: <AlertTriangle className="size-4 text-amber-400" />,
+          error: <AlertCircle className="size-4 text-coral-400" />,
+          loading: <Loader2 className="size-4 animate-spin text-ink-400" />,
         }}
       />
     </div>
@@ -127,15 +150,16 @@ function TopBar({ status, runtime, busy, onStart, onStop }: TopBarProps) {
   const { t } = useTranslation();
   const led = status.running ? "led-online" : "led-idle";
   const stateLabel = status.running ? t("topbar.online") : t("topbar.offline");
-  const bind = status.running
-    ? `${status.address ?? "0.0.0.0"}:${status.port ?? "?"}`
-    : "--";
+  const resolved = status.running
+    ? resolveDisplayAddress(status.address, status.port)
+    : null;
+  const bind = resolved?.display ?? "--";
   const uptime = status.running ? formatUptime(status.uptime_seconds) : "--";
 
   return (
     <header className="flex h-12 items-center justify-between gap-4 border-b border-carbon-500 bg-carbon-900/80 px-4">
       <div className="flex items-center gap-3">
-        <Terminal className="h-4 w-4 text-mint-400" />
+        <Terminal className="size-4 text-mint-400" />
         <span className="font-mono text-[12px] uppercase tracking-[0.32em] text-ink-100">
           open-promux
         </span>
@@ -159,7 +183,9 @@ function TopBar({ status, runtime, busy, onStart, onStop }: TopBarProps) {
           </span>
         </Slot>
         <Slot label={t("topbar.bind")}>
-          <span className="data-value">{bind}</span>
+          <span className="data-value" title={resolved?.hint ?? undefined}>
+            {bind}
+          </span>
         </Slot>
         <Slot label={t("topbar.uptime")}>
           <span className="data-value">{uptime}</span>
@@ -170,12 +196,12 @@ function TopBar({ status, runtime, busy, onStart, onStop }: TopBarProps) {
         <LanguageSwitch />
         {status.running ? (
           <Button variant="danger" size="sm" disabled={busy} onClick={onStop}>
-            <Pause className="h-3.5 w-3.5" />
+            <Pause className="size-3.5" />
             {t("topbar.stop")}
           </Button>
         ) : (
           <Button variant="primary" size="sm" disabled={busy} onClick={onStart}>
-            <Play className="h-3.5 w-3.5" />
+            <Play className="size-3.5" />
             {t("topbar.start")}
           </Button>
         )}

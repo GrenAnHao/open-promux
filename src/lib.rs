@@ -6,7 +6,7 @@
 //!
 //! The CLI binary (`src/main.rs`) is a thin wrapper around [`run_cli`].
 
-mod config;
+pub mod config;
 mod convert;
 pub mod logs;
 mod proxy;
@@ -15,10 +15,11 @@ pub mod stats;
 mod types;
 
 pub use config::{
-    Config, HealthConfig, LoadBalanceStrategy, PerformanceConfig, RectifierConfig, RoutingConfig,
-    UpstreamApiFormat, UpstreamConfig, UpstreamProxyConfig, UpstreamProxyType,
+    Config, DebugConfig, DebugLogLevel, HealthConfig, LoadBalanceStrategy, PerformanceConfig,
+    RectifierConfig, RoutingConfig, UpstreamApiFormat, UpstreamConfig, UpstreamProxyConfig,
+    UpstreamProxyType,
 };
 pub use logs::{LogBus, LogBusLayer, LogLine};
-pub use proxy::AppState;
+pub use proxy::{AppState, UpstreamHealthSnapshot};
 pub use runtime::{ServerHandle, ServerStartError, ServerStartInfo, build_router, run_cli, serve};
 pub use stats::{CounterSnapshot, ModelCounters, TrafficSnapshot, TrafficStats, UpstreamCounters};

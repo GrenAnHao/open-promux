@@ -1,7 +1,7 @@
 {
   "name": "open-promux-desktop",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
@@ -32,6 +32,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^17.0.7",
+    "recharts": "^3.8.1",
     "sonner": "^1.7.4",
     "tailwind-merge": "^3.0.2"
   },

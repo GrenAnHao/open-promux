@@ -43,12 +43,14 @@ fn test_app_state(config: Config) -> Arc<AppState> {
 
 fn test_config(upstream_url: String) -> Arc<AppState> {
     test_app_state(Config {
+        host: "0.0.0.0".to_string(),
         port: 0,
         auth_key: None,
         performance: crate::config::PerformanceConfig::default(),
         routing: crate::config::RoutingConfig::default(),
         health: crate::config::HealthConfig::default(),
         rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         upstream: Some(crate::config::UpstreamConfig {
             name: None,
             url: upstream_url,
@@ -67,12 +69,14 @@ fn test_config(upstream_url: String) -> Arc<AppState> {
 
 fn test_multi_config(upstream_urls: Vec<String>) -> Arc<AppState> {
     test_app_state(Config {
+        host: "0.0.0.0".to_string(),
         port: 0,
         auth_key: None,
         performance: crate::config::PerformanceConfig::default(),
         routing: crate::config::RoutingConfig::default(),
         health: crate::config::HealthConfig::default(),
         rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         upstream: None,
         upstreams: upstream_urls
             .into_iter()
@@ -94,12 +98,14 @@ fn test_multi_config(upstream_urls: Vec<String>) -> Arc<AppState> {
 
 fn test_auth_config(upstream_url: String) -> Arc<AppState> {
     test_app_state(Config {
+        host: "0.0.0.0".to_string(),
         port: 0,
         auth_key: Some("proxy-secret".into()),
         performance: crate::config::PerformanceConfig::default(),
         routing: crate::config::RoutingConfig::default(),
         health: crate::config::HealthConfig::default(),
         rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         upstream: Some(crate::config::UpstreamConfig {
             name: None,
             url: upstream_url,
@@ -1204,6 +1210,46 @@ async fn models_should_proxy_upstream_model_list() {
 }
 
 #[tokio::test]
+async fn models_should_send_anthropic_version_to_anthropic_upstream() {
+    let app = Router::new().route(
+        "/models",
+        get(|headers: HeaderMap| async move {
+            if headers
+                .get("anthropic-version")
+                .and_then(|v| v.to_str().ok())
+                != Some("2023-06-01")
+            {
+                return (StatusCode::BAD_REQUEST, "missing anthropic-version").into_response();
+            }
+            Json(json!({
+                "object": "list",
+                "data": [{"id": "claude-oups-4-6", "object": "model"}]
+            }))
+            .into_response()
+        }),
+    );
+    let upstream_url = spawn_upstream(app).await;
+    let config: Config = toml::from_str(&format!(
+        r#"
+[upstream]
+url = "{upstream_url}"
+api_format = "anthropic_messages"
+"#
+    ))
+    .unwrap();
+
+    let resp = models(State(test_app_state(config)), HeaderMap::new()).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"][0]["id"], "claude-oups-4-6");
+}
+
+#[tokio::test]
 async fn models_should_merge_model_lists_from_multiple_upstreams() {
     let upstream_a = Router::new().route(
         "/models",
@@ -2058,6 +2104,83 @@ async fn responses_should_reuse_cached_model_lists_for_repeated_plain_model_rout
 }
 
 #[tokio::test]
+async fn router_should_send_anthropic_version_when_matching_anthropic_models() {
+    let seen_model = Arc::new(Mutex::new(None::<String>));
+    let upstream_a = Router::new().route(
+        "/models",
+        get(|| async {
+            Json(json!({
+                "object": "list",
+                "data": [{"id": "other-model", "object": "model"}]
+            }))
+        }),
+    );
+    let upstream_b = Router::new()
+        .route(
+            "/models",
+            get(|headers: HeaderMap| async move {
+                if headers
+                    .get("anthropic-version")
+                    .and_then(|v| v.to_str().ok())
+                    != Some("2023-06-01")
+                {
+                    return (StatusCode::BAD_REQUEST, "missing anthropic-version").into_response();
+                }
+                Json(json!({
+                    "object": "list",
+                    "data": [{"id": "claude-oups-4-6", "object": "model"}]
+                }))
+                .into_response()
+            }),
+        )
+        .route(
+            "/messages",
+            post({
+                let seen_model = seen_model.clone();
+                move |Json(body): Json<serde_json::Value>| {
+                    let seen_model = seen_model.clone();
+                    async move {
+                        *seen_model.lock().await = body["model"].as_str().map(ToString::to_string);
+                        Json(json!({
+                            "id": "msg_1",
+                            "type": "message",
+                            "role": "assistant",
+                            "model": body["model"],
+                            "content": [{"type": "text", "text": "ok"}],
+                            "stop_reason": "end_turn",
+                            "usage": {"input_tokens": 1, "output_tokens": 1}
+                        }))
+                    }
+                }
+            }),
+        );
+    let upstream_a_url = spawn_upstream(upstream_a).await;
+    let upstream_b_url = spawn_upstream(upstream_b).await;
+    let config: Config = toml::from_str(&format!(
+        r#"
+[[upstreams]]
+name = "openai"
+url = "{upstream_a_url}"
+
+[[upstreams]]
+name = "anthropic"
+url = "{upstream_b_url}"
+api_format = "anthropic_messages"
+"#
+    ))
+    .unwrap();
+
+    let resp = chat_completions(
+        State(test_app_state(config)),
+        chat_model_request("claude-oups-4-6"),
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(seen_model.lock().await.as_deref(), Some("claude-oups-4-6"));
+}
+
+#[tokio::test]
 async fn startup_should_prefetch_model_lists_before_first_routed_request() {
     let upstream_a_model_calls = Arc::new(AtomicUsize::new(0));
     let upstream_b_model_calls = Arc::new(AtomicUsize::new(0));
@@ -2501,6 +2624,71 @@ url = "{upstream_b_url}"
 }
 
 #[tokio::test]
+async fn upstream_health_snapshot_should_report_runtime_health_for_each_upstream() {
+    let state = test_app_state(Config {
+        host: "0.0.0.0".to_string(),
+        port: 0,
+        auth_key: None,
+        performance: crate::config::PerformanceConfig::default(),
+        routing: crate::config::RoutingConfig::default(),
+        health: crate::config::HealthConfig::default(),
+        rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
+        upstream: None,
+        upstreams: vec![
+            crate::config::UpstreamConfig {
+                name: Some("primary".into()),
+                url: "http://primary.example/v1".into(),
+                api_key: String::new(),
+                auth_header: "Authorization".into(),
+                proxy: None,
+                proxy_type: crate::config::UpstreamProxyType::Http,
+                api_format: crate::config::UpstreamApiFormat::ChatCompletions,
+                max_concurrent_requests: None,
+                rpm: None,
+                tpm: None,
+            },
+            crate::config::UpstreamConfig {
+                name: Some("backup".into()),
+                url: "http://backup.example/v1".into(),
+                api_key: String::new(),
+                auth_header: "Authorization".into(),
+                proxy: None,
+                proxy_type: crate::config::UpstreamProxyType::Http,
+                api_format: crate::config::UpstreamApiFormat::Responses,
+                max_concurrent_requests: None,
+                rpm: None,
+                tpm: None,
+            },
+        ],
+    });
+    state.upstreams[1].set_health_check_result(false, 1).await;
+
+    let snapshot = state.upstream_health_snapshot().await;
+
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(snapshot[0].index, 0);
+    assert_eq!(snapshot[0].name.as_deref(), Some("primary"));
+    assert_eq!(snapshot[0].url, "http://primary.example/v1");
+    assert_eq!(
+        snapshot[0].api_format,
+        crate::config::UpstreamApiFormat::ChatCompletions
+    );
+    assert!(!snapshot[0].checked);
+    assert!(snapshot[0].healthy);
+    assert_eq!(snapshot[0].failures, 0);
+    assert_eq!(snapshot[1].index, 1);
+    assert_eq!(snapshot[1].name.as_deref(), Some("backup"));
+    assert_eq!(
+        snapshot[1].api_format,
+        crate::config::UpstreamApiFormat::Responses
+    );
+    assert!(snapshot[1].checked);
+    assert!(!snapshot[1].healthy);
+    assert_eq!(snapshot[1].failures, 1);
+}
+
+#[tokio::test]
 async fn models_should_send_bearer_authorization_when_using_openai_auth_header() {
     let app = Router::new().route(
         "/models",
@@ -2514,12 +2702,14 @@ async fn models_should_send_bearer_authorization_when_using_openai_auth_header()
         }),
     );
     let config = test_app_state(Config {
+        host: "0.0.0.0".to_string(),
         port: 0,
         auth_key: None,
         performance: crate::config::PerformanceConfig::default(),
         routing: crate::config::RoutingConfig::default(),
         health: crate::config::HealthConfig::default(),
         rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         upstream: Some(crate::config::UpstreamConfig {
             name: None,
             url: spawn_upstream(app).await,
@@ -2558,12 +2748,14 @@ async fn models_should_not_duplicate_existing_bearer_authorization_prefix() {
         }),
     );
     let config = test_app_state(Config {
+        host: "0.0.0.0".to_string(),
         port: 0,
         auth_key: None,
         performance: crate::config::PerformanceConfig::default(),
         routing: crate::config::RoutingConfig::default(),
         health: crate::config::HealthConfig::default(),
         rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         upstream: Some(crate::config::UpstreamConfig {
             name: None,
             url: spawn_upstream(app).await,
@@ -2668,12 +2860,14 @@ async fn messages_should_passthrough_to_anthropic_messages_upstream() {
         }),
     );
     let config = test_app_state(Config {
+        host: "0.0.0.0".to_string(),
         port: 0,
         auth_key: None,
         performance: crate::config::PerformanceConfig::default(),
         routing: crate::config::RoutingConfig::default(),
         health: crate::config::HealthConfig::default(),
         rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         upstream: Some(crate::config::UpstreamConfig {
             name: None,
             url: spawn_upstream(app).await,
@@ -2766,12 +2960,14 @@ async fn messages_should_translate_anthropic_request_to_chat_completions_upstrea
 
 fn responses_upstream_config(upstream_url: String) -> Arc<AppState> {
     test_app_state(Config {
+        host: "0.0.0.0".to_string(),
         port: 0,
         auth_key: None,
         performance: crate::config::PerformanceConfig::default(),
         routing: crate::config::RoutingConfig::default(),
         health: crate::config::HealthConfig::default(),
         rectifier: crate::config::RectifierConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         upstream: Some(crate::config::UpstreamConfig {
             name: None,
             url: upstream_url,
@@ -2894,15 +3090,44 @@ async fn messages_should_translate_to_responses_upstream() {
 }
 
 #[tokio::test]
-async fn chat_completions_should_reject_streaming_non_chat_upstream_with_501() {
-    // chat downstream + responses upstream + streaming → still 501.
+async fn chat_completions_should_stream_from_responses_upstream() {
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
     let app = Router::new().route(
         "/responses",
-        post(|| async {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "should not have been called",
-            )
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                let chunks = vec![
+                    r#"event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"test-model","status":"in_progress","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Hello chat"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"test-model","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello chat","annotations":[]}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}
+
+"#,
+                ];
+                let stream = futures::stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Ok::<_, Infallible>(Bytes::from(chunk))),
+                );
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }
         }),
     );
     let config = responses_upstream_config(spawn_upstream(app).await);
@@ -2922,12 +3147,83 @@ async fn chat_completions_should_reject_streaming_non_chat_upstream_with_501() {
         .unwrap();
 
     let resp = chat_completions(State(config), req).await;
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("/v1/responses"));
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let seen = seen.lock().await.clone().unwrap();
+
+    assert_eq!(seen["stream"], true);
+    assert!(text.contains("chat.completion.chunk"));
+    assert!(text.contains("\"content\":\"Hello chat\""));
+    assert!(text.contains("[DONE]"));
+}
+
+#[tokio::test]
+async fn chat_completions_should_stream_from_anthropic_messages_upstream() {
+    let app = Router::new().route(
+        "/messages",
+        post(|| async {
+            let chunks = vec![
+                r#"data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-test"}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello anthropic"}}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":1,"output_tokens":2}}
+
+data: {"type":"message_stop"}
+
+"#,
+            ];
+            let stream = futures::stream::iter(
+                chunks
+                    .into_iter()
+                    .map(|chunk| Ok::<_, Infallible>(Bytes::from(chunk))),
+            );
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(stream))
+                .unwrap()
+        }),
+    );
+    let upstream_url = spawn_upstream(app).await;
+    let config: Config = toml::from_str(&format!(
+        r#"
+[upstream]
+url = "{upstream_url}"
+api_format = "anthropic_messages"
+"#
+    ))
+    .unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "model": "claude-test",
+                "stream": true,
+                "messages": [{"role": "user", "content": "Hi"}]
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let resp = chat_completions(State(test_app_state(config)), req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+
+    assert!(text.contains("chat.completion.chunk"));
+    assert!(text.contains("\"content\":\"Hello anthropic\""));
+    assert!(text.contains("[DONE]"));
 }
 
 #[tokio::test]
@@ -2998,26 +3294,108 @@ async fn chat_completions_should_bridge_to_responses_upstream_non_streaming() {
 }
 
 #[tokio::test]
-async fn messages_should_reject_streaming_with_chat_completions_upstream() {
-    // No upstream call expected; the endpoint should short-circuit with 501.
+async fn messages_should_stream_from_chat_completions_upstream() {
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
     let app = Router::new().route(
         "/chat/completions",
-        post(|| async {
-            // If we ever reach the upstream the test fails.
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "should not have been called",
-            )
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                let chunks = vec![
+                    r#"data: {"id":"chunk_1","model":"claude-test","choices":[{"index":0,"delta":{"content":"Hello messages"},"finish_reason":null}]}
+
+data: {"id":"chunk_2","model":"claude-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}
+
+data: [DONE]
+
+"#,
+                ];
+                let stream = futures::stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Ok::<_, Infallible>(Bytes::from(chunk))),
+                );
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }
         }),
     );
     let config = test_config(spawn_upstream(app).await);
 
     let resp = messages(State(config), anthropic_messages_request(true)).await;
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("Streaming"));
-    assert!(text.contains("anthropic_messages"));
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let seen = seen.lock().await.clone().unwrap();
+
+    assert_eq!(seen["stream"], true);
+    assert!(text.contains("message_start"));
+    assert!(text.contains("text_delta"));
+    assert!(text.contains("Hello messages"));
+    assert!(text.contains("message_stop"));
+}
+
+#[tokio::test]
+async fn messages_should_stream_from_responses_upstream() {
+    let seen = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let seen_clone = seen.clone();
+    let app = Router::new().route(
+        "/responses",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let seen = seen_clone.clone();
+            async move {
+                *seen.lock().await = Some(body);
+                let chunks = vec![
+                    r#"event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"claude-test","status":"in_progress","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Hello responses"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1700000000,"model":"claude-test","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello responses","annotations":[]}]}],"usage":{"input_tokens":4,"output_tokens":2,"total_tokens":6}}}
+
+"#,
+                ];
+                let stream = futures::stream::iter(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Ok::<_, Infallible>(Bytes::from(chunk))),
+                );
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }
+        }),
+    );
+    let config = responses_upstream_config(spawn_upstream(app).await);
+
+    let resp = messages(State(config), anthropic_messages_request(true)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let seen = seen.lock().await.clone().unwrap();
+
+    assert_eq!(seen["stream"], true);
+    assert!(text.contains("message_start"));
+    assert!(text.contains("text_delta"));
+    assert!(text.contains("Hello responses"));
+    assert!(text.contains("message_stop"));
 }

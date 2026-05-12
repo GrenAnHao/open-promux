@@ -6,11 +6,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  ChatProbeResult,
   Config,
+  FetchedModels,
   LogLine,
   RuntimeInfo,
   ServerStatus,
-  UpstreamProbeResult,
+  UpstreamConfig,
+  UpstreamHealthSnapshot,
 } from "./types";
 
 export const api = {
@@ -28,6 +31,7 @@ export const api = {
   startServer: () => invoke<ServerStatus>("start_server"),
   stopServer: () => invoke<void>("stop_server"),
   getStatus: () => invoke<ServerStatus>("get_status"),
+  getUpstreamHealth: () => invoke<UpstreamHealthSnapshot[]>("get_upstream_health"),
 
   // ---- logs ----
   getLogsSnapshot: () => invoke<LogLine[]>("get_logs_snapshot"),
@@ -39,11 +43,13 @@ export const api = {
   openDebugDir: () => invoke<void>("open_debug_dir"),
 
   // ---- diagnostics ----
-  probeUpstream: (params: {
-    url: string;
-    apiKey?: string | null;
-    authHeader?: string | null;
-  }) => invoke<UpstreamProbeResult>("probe_upstream", params),
+  fetchUpstreamModels: (upstream: UpstreamConfig) =>
+    invoke<FetchedModels>("fetch_upstream_models", { upstream }),
+  chatProbeUpstream: (params: {
+    upstream: UpstreamConfig;
+    model: string;
+    prompt?: string | null;
+  }) => invoke<ChatProbeResult>("chat_probe_upstream", params),
 
   // ---- autostart ----
   getAutostartEnabled: () => invoke<boolean>("get_autostart_enabled"),
@@ -60,7 +66,7 @@ export const api = {
   clearTrafficStats: () => invoke<void>("clear_traffic_stats"),
 };
 
-export interface CounterSnapshot {
+interface CounterSnapshot {
   requests_total: number;
   requests_success: number;
   requests_error: number;
@@ -70,12 +76,12 @@ export interface CounterSnapshot {
   latency_ms_max: number;
 }
 
-export interface UpstreamCounters {
+interface UpstreamCounters {
   upstream: string;
   counters: CounterSnapshot;
 }
 
-export interface ModelCounters {
+interface ModelCounters {
   upstream: string;
   model: string;
   counters: CounterSnapshot;
@@ -88,6 +94,6 @@ export interface TrafficSnapshot {
   models: ModelCounters[];
 }
 
-export interface DesktopPreferences {
+interface DesktopPreferences {
   language?: string | null;
 }

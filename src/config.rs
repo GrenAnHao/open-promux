@@ -3,6 +3,11 @@ use std::{collections::BTreeMap, path::Path};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Host interface to bind. Defaults to `0.0.0.0` so other machines on
+    /// the LAN can reach the gateway. Use `127.0.0.1` to restrict access
+    /// to the local machine only.
+    #[serde(default = "default_host")]
+    pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -15,6 +20,8 @@ pub struct Config {
     pub health: HealthConfig,
     #[serde(default)]
     pub rectifier: RectifierConfig,
+    #[serde(default)]
+    pub debug: DebugConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<UpstreamConfig>,
     #[serde(default)]
@@ -53,6 +60,56 @@ pub struct HealthConfig {
     pub interval_millis: u64,
     #[serde(default = "default_unhealthy_after_failures")]
     pub unhealthy_after_failures: u64,
+}
+
+/// On-disk knobs for the "debug" panel in the desktop UI.
+///
+/// Everything here is opt-in: when `enabled` is `false` the gateway behaves
+/// exactly like before (errors still produce the existing
+/// `upstream-error-*.json` dumps, but nothing else is written).
+///
+/// `log_level` is applied at process startup (picked up by tracing when
+/// `RUST_LOG` is not set), so changes take effect the next time the
+/// desktop app or CLI is launched.
+///
+/// `log_conversations = true` writes the incoming client request body to
+/// `./debug/conversation-*.json` on every `/v1/chat/completions`,
+/// `/v1/responses`, and `/v1/messages` call. Combined with the existing
+/// upstream error dumps, this is the in/out pair the UI surfaces as
+/// "conversation logging".
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DebugConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub log_level: DebugLogLevel,
+    #[serde(default)]
+    pub log_conversations: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DebugLogLevel {
+    Trace,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl DebugLogLevel {
+    /// Canonical lowercase label, matching `tracing_subscriber::EnvFilter`
+    /// directives.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -348,9 +405,38 @@ where
     }
 }
 
+fn default_host() -> String {
+    "0.0.0.0".to_string()
+}
+
 fn default_port() -> u16 {
     8080
 }
+
+/// Minimal TOML written when no config exists yet. Mirrors the leading
+/// commented section of `config.example.toml` but kept short so the
+/// first-time desktop user sees a friendly starting point.
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# open-promux first-run config.
+# Edit me in the desktop UI or directly in this file.
+
+# Host to bind. Use 0.0.0.0 to accept LAN traffic, 127.0.0.1 to keep
+# the gateway local-only.
+host = "127.0.0.1"
+
+# TCP port the gateway listens on.
+port = 8080
+
+# Uncomment to require `Authorization: Bearer <key>` from clients.
+# auth_key = "change-me"
+
+# At least one upstream is required before you can serve traffic.
+# Add it from the Upstreams tab or by editing this file.
+# [[upstreams]]
+# name = "example"
+# url = "https://api.openai.com/v1"
+# api_key = "sk-..."
+# api_format = "chat_completions"
+"#;
 
 fn default_health_interval_millis() -> u64 {
     30_000
@@ -726,5 +812,33 @@ tpm = 50000
         assert_eq!(upstream.max_concurrent_requests, Some(16));
         assert_eq!(upstream.rpm, Some(100));
         assert_eq!(upstream.tpm, Some(50000));
+    }
+
+    #[test]
+    fn config_should_default_host_to_all_interfaces() {
+        let config: Config = toml::from_str(r#"port = 8080"#).unwrap();
+        assert_eq!(config.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn config_should_preserve_explicit_host() {
+        let config: Config = toml::from_str(
+            r#"
+host = "127.0.0.1"
+port = 8080
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn default_config_template_should_parse_back_into_config() {
+        let config =
+            Config::from_toml_str(DEFAULT_CONFIG_TEMPLATE).expect("default template must parse");
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 8080);
+        assert!(config.configured_upstreams().is_empty());
+        assert!(config.auth_key.is_none());
     }
 }

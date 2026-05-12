@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
+import { TrafficChart } from "@/components/stats/traffic-chart";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { api, type TrafficSnapshot } from "@/lib/api";
@@ -75,11 +76,11 @@ export function StatsPage() {
         trailing={
           <>
             <Button size="sm" variant="ghost" onClick={() => void reload()}>
-              <RefreshCw className="h-3.5 w-3.5" />
+              <RefreshCw className="size-3.5" />
               {t("stats.refresh")}
             </Button>
             <Button size="sm" variant="danger" onClick={() => void clear()}>
-              <Eraser className="h-3.5 w-3.5" />
+              <Eraser className="size-3.5" />
               {t("stats.clear")}
             </Button>
           </>
@@ -121,6 +122,10 @@ export function StatsPage() {
             value={`${snapshot.global.latency_ms_max} ms`}
           />
         </div>
+      </Panel>
+
+      <Panel title={t("stats.titleChart")}>
+        <TrafficChart snapshot={snapshot} />
       </Panel>
 
       <Panel title={t("stats.titleUpstreams")}>

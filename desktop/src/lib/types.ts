@@ -4,15 +4,18 @@
 
 export type LoadBalanceStrategy = "first" | "round_robin";
 export type UpstreamProxyType = "http" | "socks";
-export type UpstreamApiFormat = "chat_completions" | "anthropic_messages";
+export type UpstreamApiFormat =
+  | "chat_completions"
+  | "anthropic_messages"
+  | "responses";
 
-export interface PerformanceConfig {
+interface PerformanceConfig {
   upstream_max_concurrent_requests?: number | null;
   global_rpm?: number | null;
   global_tpm?: number | null;
 }
 
-export interface RoutingConfig {
+interface RoutingConfig {
   load_balance: LoadBalanceStrategy;
   automatic_failover: boolean;
   fallback_model?: string | null;
@@ -20,16 +23,35 @@ export interface RoutingConfig {
   model_aliases: Record<string, string>;
 }
 
-export interface HealthConfig {
+interface HealthConfig {
   enabled: boolean;
   interval_millis: number;
   unhealthy_after_failures: number;
 }
 
-export interface RectifierConfig {
+interface RectifierConfig {
   enabled: boolean;
   thinking_signature: boolean;
   thinking_budget: boolean;
+}
+
+export type DebugLogLevel = "trace" | "debug" | "info" | "warn" | "error";
+
+/**
+ * Mirrors `DebugConfig` in `src/config.rs`.
+ *
+ * - `enabled`: master switch for the Debug panel; when off the gateway
+ *   behaves exactly like before and nothing in this struct is honoured.
+ * - `log_level`: tracing filter applied on process start (picks up next
+ *   desktop launch); `RUST_LOG` still wins when set.
+ * - `log_conversations`: when true, every inbound request body is written
+ *   to `./debug/conversation-*.json`. Upstream errors are still captured
+ *   separately via the existing `upstream-error-*.json` dumps.
+ */
+interface DebugConfig {
+  enabled: boolean;
+  log_level: DebugLogLevel;
+  log_conversations: boolean;
 }
 
 export interface UpstreamConfig {
@@ -46,12 +68,18 @@ export interface UpstreamConfig {
 }
 
 export interface Config {
+  /**
+   * Listen interface. `127.0.0.1` keeps the proxy local-only; `0.0.0.0`
+   * accepts traffic from the LAN. Mirrors `Config.host` in `src/config.rs`.
+   */
+  host: string;
   port: number;
   auth_key?: string | null;
   performance: PerformanceConfig;
   routing: RoutingConfig;
   health: HealthConfig;
   rectifier: RectifierConfig;
+  debug: DebugConfig;
   upstream?: UpstreamConfig | null;
   upstreams: UpstreamConfig[];
 }
@@ -70,10 +98,27 @@ export interface ServerStatus {
   uptime_seconds: number;
 }
 
-export interface UpstreamProbeResult {
+export interface UpstreamHealthSnapshot {
+  index: number;
+  name?: string | null;
+  url: string;
+  api_format: UpstreamApiFormat;
+  checked: boolean;
+  healthy: boolean;
+  failures: number;
+}
+
+export interface FetchedModels {
+  models: string[];
+  latency_ms: number;
+}
+
+export interface ChatProbeResult {
   ok: boolean;
   status: number;
   latency_ms: number;
+  model: string;
+  preview?: string | null;
   message?: string | null;
 }
 
@@ -91,6 +136,7 @@ export interface LogLine {
  */
 export function emptyConfig(): Config {
   return {
+    host: "127.0.0.1",
     port: 8080,
     auth_key: null,
     performance: {},
@@ -109,6 +155,11 @@ export function emptyConfig(): Config {
       enabled: true,
       thinking_signature: true,
       thinking_budget: true,
+    },
+    debug: {
+      enabled: false,
+      log_level: "info",
+      log_conversations: false,
     },
     upstream: null,
     upstreams: [],
@@ -157,6 +208,7 @@ export function normalizeConfig(raw: Partial<Config> | null | undefined): Config
   return {
     ...base,
     ...raw,
+    host: raw.host ?? base.host,
     performance: { ...base.performance, ...(raw.performance ?? {}) },
     routing: {
       ...base.routing,
@@ -165,6 +217,7 @@ export function normalizeConfig(raw: Partial<Config> | null | undefined): Config
     },
     health: { ...base.health, ...(raw.health ?? {}) },
     rectifier: { ...base.rectifier, ...(raw.rectifier ?? {}) },
+    debug: { ...base.debug, ...(raw.debug ?? {}) },
     upstreams: raw.upstreams ?? [],
     upstream: raw.upstream ?? null,
   };

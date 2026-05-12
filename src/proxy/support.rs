@@ -11,22 +11,56 @@ pub(super) fn spawn_health_checks(
             futures::future::join_all(upstreams.iter().map(|upstream| async move {
                 let upstream_url = upstream.config.url.trim_end_matches('/');
                 let target = format!("{upstream_url}/models");
-                let healthy =
-                    match apply_upstream_auth(upstream.client.get(&target), &upstream.config)
+                let (healthy, detail) =
+                    match apply_model_list_headers(upstream.client.get(&target), &upstream.config)
                         .send()
                         .await
                     {
-                        Ok(resp) => resp.status().is_success(),
-                        Err(_) => false,
+                        Ok(resp) => {
+                            let status = resp.status();
+                            (status.is_success(), format!("status={status}"))
+                        }
+                        Err(err) => (false, format!("error={err}")),
                     };
-                upstream
+                let update = upstream
                     .set_health_check_result(healthy, unhealthy_after_failures)
                     .await;
+                log_health_check_result(upstream, &target, update, &detail);
             }))
             .await;
             tokio::time::sleep(interval).await;
         }
     });
+}
+
+fn log_health_check_result(
+    upstream: &UpstreamState,
+    target: &str,
+    update: UpstreamHealthUpdate,
+    detail: &str,
+) {
+    let upstream_name = upstream_log_name(&upstream.config);
+    if update.current_healthy {
+        if update.first_check || !update.previous_healthy {
+            tracing::info!(
+                "[health] upstream {upstream_name} healthy target={target} failures={} {detail}",
+                update.failures
+            );
+        }
+        return;
+    }
+
+    if update.previous_healthy {
+        tracing::warn!(
+            "[health] upstream {upstream_name} marked unhealthy target={target} failures={} {detail}",
+            update.failures
+        );
+    } else {
+        tracing::warn!(
+            "[health] upstream {upstream_name} still unhealthy target={target} failures={} {detail}",
+            update.failures
+        );
+    }
 }
 
 pub(super) fn spawn_model_cache_warmup(upstreams: Vec<Arc<UpstreamState>>) {
@@ -94,6 +128,18 @@ pub(super) fn apply_upstream_auth(
 
 pub(super) fn apply_anthropic_headers(builder: RequestBuilder) -> RequestBuilder {
     builder.header("anthropic-version", "2023-06-01")
+}
+
+pub(super) fn apply_model_list_headers(
+    builder: RequestBuilder,
+    config: &UpstreamConfig,
+) -> RequestBuilder {
+    let builder = apply_upstream_auth(builder, config);
+    if matches!(config.api_format, UpstreamApiFormat::AnthropicMessages) {
+        apply_anthropic_headers(builder)
+    } else {
+        builder
+    }
 }
 
 pub(super) fn is_proxy_authorized(config: &Config, headers: &HeaderMap) -> bool {
@@ -200,6 +246,57 @@ pub(super) fn dump_upstream_error_debug(
             path.display()
         ),
         Err(e) => tracing::warn!("{label} failed to write upstream error debug dump: {e}"),
+    }
+}
+
+/// Persist a single client-side request body to `./debug/` (or the path
+/// overridden by `OPEN_PROMUX_DEBUG_DIR`) when the user has opted into
+/// conversation logging from the desktop **Debug** panel.
+///
+/// Only called from the `/v1/chat/completions`, `/v1/responses`, and
+/// `/v1/messages` handlers, and only when `config.debug.enabled &&
+/// config.debug.log_conversations` is true — the rest of the gateway is
+/// untouched. Upstream responses are already captured by
+/// [`dump_upstream_error_debug`] whenever an upstream returns a non-2xx.
+pub(super) fn dump_conversation_debug(label: &str, request_body: &[u8]) {
+    let debug_dir = std::env::var_os("OPEN_PROMUX_DEBUG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("debug"));
+    if let Err(e) = std::fs::create_dir_all(&debug_dir) {
+        tracing::warn!("{label} conversation debug dump: failed to create dir: {e}");
+        return;
+    }
+
+    let body_value =
+        serde_json::from_slice::<serde_json::Value>(request_body).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(request_body).into_owned())
+        });
+    let dump = serde_json::json!({
+        "label": label,
+        "timestamp_ms": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or_default(),
+        "request": body_value,
+    });
+    let sanitized_label = label
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .replace(['/', ' '], "_");
+    let file_name = format!(
+        "conversation-{}-{}.json",
+        sanitized_label,
+        uuid::Uuid::new_v4(),
+    );
+    let path = debug_dir.join(file_name);
+    match serde_json::to_vec_pretty(&dump)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| std::fs::write(&path, bytes))
+    {
+        Ok(()) => tracing::debug!(
+            "{label} wrote conversation debug dump: {}",
+            path.display()
+        ),
+        Err(e) => tracing::warn!("{label} failed to write conversation debug dump: {e}"),
     }
 }
 
@@ -373,7 +470,7 @@ pub(super) async fn fetch_model_items(
     let target = format!("{upstream_url}/models");
     let _upstream_permit = upstream.acquire_permit().await;
     let upstream_resp = send_with_retries(label, config, || {
-        apply_upstream_auth(upstream.client.get(&target), config)
+        apply_model_list_headers(upstream.client.get(&target), config)
     })
     .await
     .map_err(|e| {

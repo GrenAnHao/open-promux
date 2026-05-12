@@ -2593,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "open-promux"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "futures",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "open-promux-desktop"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dirs 5.0.1",
  "open-promux",
@@ -2623,6 +2623,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
+ "tempfile",
  "tokio",
  "toml 0.8.2",
  "tracing",

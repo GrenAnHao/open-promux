@@ -1,5 +1,5 @@
 import { Pencil, Plus, Save, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -32,6 +32,7 @@ import {
   emptyUpstream,
   readUpstreams,
 } from "@/lib/types";
+import { upstreamKey } from "@/lib/upstream-probe-cache";
 
 export function UpstreamsPage() {
   const { t } = useTranslation();
@@ -44,6 +45,15 @@ export function UpstreamsPage() {
   // Always render via the merged-list helper, but keep persistence aware of
   // whether the user is using the legacy `[upstream]` form or the table form.
   const upstreams = readUpstreams(config);
+  const columnLabels = [
+    t("upstreams.columnName"),
+    t("upstreams.columnUrl"),
+    t("upstreams.columnAuthHeader"),
+    t("upstreams.columnFormat"),
+    t("upstreams.columnProxy"),
+    t("upstreams.columnLimits"),
+    "",
+  ];
 
   const beginAdd = () =>
     setEditing({ index: null, draft: emptyUpstream() });
@@ -94,26 +104,27 @@ export function UpstreamsPage() {
     setEditing(null);
   };
 
-  useEffect(() => {
-    if (error) toast.error(error);
-  }, [error]);
-
   return (
-    <div className="p-4">
+    <div className="flex flex-1 min-h-0 flex-col p-4">
       <Panel
         title={t("upstreams.title")}
+        className="flex flex-1 min-h-0 flex-col min-w-0"
+        bodyClassName="flex-1 min-h-0 flex flex-col"
         trailing={
           <>
             <Button size="sm" variant="ghost" onClick={() => void reload()}>
               {t("common.reload")}
             </Button>
             <Button size="sm" variant="primary" onClick={beginAdd}>
-              <Plus className="h-3.5 w-3.5" />
+              <Plus className="size-3.5" />
               {t("common.add")}
             </Button>
           </>
         }
       >
+        {error ? (
+          <p className="mb-3 font-mono text-sm text-coral-400">{error}</p>
+        ) : null}
         {loading ? (
           <p className="font-mono text-sm text-ink-500">{t("common.loading")}</p>
         ) : upstreams.length === 0 ? (
@@ -121,20 +132,13 @@ export function UpstreamsPage() {
             {t("upstreams.empty", { addLabel: t("common.add") })}
           </p>
         ) : (
-          <table className="w-full border-collapse font-mono text-[12.5px]">
+          <div className="scrollbar-thin -mx-4 -mb-4 flex-1 min-h-0 overflow-x-auto overflow-y-auto px-4 pb-4">
+            <table className="min-w-full border-collapse font-mono text-[12.5px]">
             <thead>
               <tr>
-                {[
-                  t("upstreams.columnName"),
-                  t("upstreams.columnUrl"),
-                  t("upstreams.columnAuthHeader"),
-                  t("upstreams.columnFormat"),
-                  t("upstreams.columnProxy"),
-                  t("upstreams.columnLimits"),
-                  "",
-                ].map((label, idx) => (
+                {columnLabels.map((label) => (
                   <th
-                    key={`${label}-${idx}`}
+                    key={label || "actions"}
                     className="border-b border-carbon-500 py-1.5 pr-3 text-left text-[11px] font-normal uppercase tracking-[0.18em] text-ink-500"
                   >
                     {label}
@@ -144,7 +148,7 @@ export function UpstreamsPage() {
             </thead>
             <tbody>
               {upstreams.map((upstream, index) => (
-                <tr key={index} className="text-ink-100">
+                <tr key={upstreamRowKey(upstream)} className="text-ink-100">
                   <td className="border-b border-carbon-700 py-1.5 pr-3">
                     {upstream.name || (
                       <span className="text-ink-500">{t("common.none")}</span>
@@ -173,7 +177,7 @@ export function UpstreamsPage() {
                         onClick={() => beginEdit(index)}
                         aria-label={t("common.edit")}
                       >
-                        <Pencil className="h-3.5 w-3.5" />
+                        <Pencil className="size-3.5" />
                       </Button>
                       <Button
                         size="icon"
@@ -181,7 +185,7 @@ export function UpstreamsPage() {
                         onClick={() => void remove(index)}
                         aria-label={t("common.delete")}
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <Trash2 className="size-3.5" />
                       </Button>
                     </div>
                   </td>
@@ -189,6 +193,7 @@ export function UpstreamsPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </Panel>
 
@@ -210,7 +215,7 @@ export function UpstreamsPage() {
             <UpstreamForm
               draft={editing.draft}
               onChange={(next) =>
-                setEditing({ ...editing, draft: next })
+                setEditing((prev) => prev && { ...prev, draft: next })
               }
             />
           )}
@@ -219,7 +224,7 @@ export function UpstreamsPage() {
               <Button variant="ghost">{t("common.cancel")}</Button>
             </DialogClose>
             <Button variant="primary" onClick={() => void submit()}>
-              <Save className="h-3.5 w-3.5" />
+              <Save className="size-3.5" />
               {t("common.save")}
             </Button>
           </DialogFooter>
@@ -240,7 +245,7 @@ function UpstreamForm({ draft, onChange }: UpstreamFormProps) {
     onChange({ ...draft, [key]: value });
 
   return (
-    <div className="grid gap-4 px-4 py-4 md:grid-cols-2">
+    <div className="grid gap-4 p-4 md:grid-cols-2">
       <Field label={t("upstreams.fieldName")}>
         <Input
           value={draft.name ?? ""}
@@ -261,6 +266,7 @@ function UpstreamForm({ draft, onChange }: UpstreamFormProps) {
           <SelectContent>
             <SelectItem value="chat_completions">chat_completions</SelectItem>
             <SelectItem value="anthropic_messages">anthropic_messages</SelectItem>
+            <SelectItem value="responses">responses</SelectItem>
           </SelectContent>
         </Select>
       </Field>
@@ -360,4 +366,16 @@ function sanitize(draft: UpstreamConfig): UpstreamConfig {
     auth_header: draft.auth_header.trim() || "Authorization",
     proxy: draft.proxy?.trim() || null,
   };
+}
+
+function upstreamRowKey(upstream: UpstreamConfig) {
+  return [
+    upstream.name ?? "",
+    upstreamKey(upstream),
+    upstream.proxy ?? "",
+    upstream.proxy_type,
+    upstream.max_concurrent_requests ?? "",
+    upstream.rpm ?? "",
+    upstream.tpm ?? "",
+  ].join("\u0001");
 }

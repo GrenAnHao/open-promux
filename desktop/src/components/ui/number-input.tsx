@@ -86,7 +86,7 @@ export function NumberInput({
           onClick={() => adjust(step)}
           className="pointer-events-auto flex flex-1 items-center justify-center text-ink-500 transition-colors hover:bg-carbon-700/80 hover:text-mint-300 active:bg-carbon-600 disabled:opacity-40"
         >
-          <ChevronUp className="h-3 w-3" strokeWidth={2.5} />
+          <ChevronUp className="size-3" strokeWidth={2.5} />
         </button>
         <button
           type="button"
@@ -96,7 +96,7 @@ export function NumberInput({
           onClick={() => adjust(-step)}
           className="pointer-events-auto flex flex-1 items-center justify-center border-t border-carbon-500 text-ink-500 transition-colors hover:bg-carbon-700/80 hover:text-mint-300 active:bg-carbon-600 disabled:opacity-40"
         >
-          <ChevronDown className="h-3 w-3" strokeWidth={2.5} />
+          <ChevronDown className="size-3" strokeWidth={2.5} />
         </button>
       </div>
     </div>

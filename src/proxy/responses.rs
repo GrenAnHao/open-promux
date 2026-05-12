@@ -40,6 +40,10 @@ pub async fn responses(State(state): State<Arc<AppState>>, req: Request<Body>) -
         responses_req.model
     );
 
+    if state.config.debug.enabled && state.config.debug.log_conversations {
+        dump_conversation_debug("[responses]", &body_bytes);
+    }
+
     let chat_req = convert::responses_to_chat(&responses_req);
 
     let chat_body = match serde_json::to_vec(&chat_req) {

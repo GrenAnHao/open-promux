@@ -50,6 +50,10 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
 
     tracing::info!("[messages] POST /v1/messages model={model:?} stream={is_stream}");
 
+    if state.config.debug.enabled && state.config.debug.log_conversations {
+        dump_conversation_debug("[messages]", &body_bytes);
+    }
+
     let selections = select_upstreams_for_model(&state, model).await;
     if selections.is_empty() {
         return (
@@ -92,45 +96,43 @@ pub async fn messages(State(state): State<Arc<AppState>>, req: Request<Body>) ->
             }
             UpstreamApiFormat::ChatCompletions => {
                 if is_stream {
-                    tracing::warn!(
-                        "[messages] ChatCompletions upstream + Anthropic streaming not yet supported"
-                    );
-                    return (
-                        StatusCode::NOT_IMPLEMENTED,
-                        "Streaming `/v1/messages` against a ChatCompletions upstream is not yet implemented. \
-                         Use an `api_format = \"anthropic_messages\"` upstream, or call `/v1/responses` (which already bridges Responses → Chat / Anthropic in both directions).",
+                    handle_chat_to_anthropic_streaming(
+                        upstream,
+                        &selection,
+                        &request_json,
+                        can_failover,
                     )
-                        .into_response();
+                    .await
+                } else {
+                    handle_chat_to_anthropic_non_streaming(
+                        upstream,
+                        &selection,
+                        &request_json,
+                        can_failover,
+                        start,
+                    )
+                    .await
                 }
-                handle_chat_to_anthropic_non_streaming(
-                    upstream,
-                    &selection,
-                    &request_json,
-                    can_failover,
-                    start,
-                )
-                .await
             }
             UpstreamApiFormat::Responses => {
                 if is_stream {
-                    tracing::warn!(
-                        "[messages] Responses upstream + Anthropic streaming not yet supported"
-                    );
-                    return (
-                        StatusCode::NOT_IMPLEMENTED,
-                        "Streaming `/v1/messages` against a Responses upstream is not yet implemented. \
-                         Use an `api_format = \"anthropic_messages\"` upstream, or call `/v1/responses` (which speaks the upstream natively).",
+                    handle_responses_to_anthropic_streaming(
+                        upstream,
+                        &selection,
+                        &request_json,
+                        can_failover,
                     )
-                        .into_response();
+                    .await
+                } else {
+                    handle_responses_to_anthropic_non_streaming(
+                        upstream,
+                        &selection,
+                        &request_json,
+                        can_failover,
+                        start,
+                    )
+                    .await
                 }
-                handle_responses_to_anthropic_non_streaming(
-                    upstream,
-                    &selection,
-                    &request_json,
-                    can_failover,
-                    start,
-                )
-                .await
             }
         };
 
@@ -296,6 +298,196 @@ async fn handle_anthropic_passthrough(
             (StatusCode::BAD_GATEWAY, "failed to read upstream response").into_response()
         }
     })
+}
+
+async fn handle_chat_to_anthropic_streaming(
+    upstream: &UpstreamState,
+    selection: &UpstreamSelection<'_>,
+    request_json: &serde_json::Value,
+    can_failover: bool,
+) -> Option<Response> {
+    let upstream_config = &upstream.config;
+
+    let responses_req = match anthropic_value_to_responses_request(request_json) {
+        Ok(req) => req,
+        Err(message) => {
+            tracing::error!("[messages] failed to translate anthropic request: {message}");
+            return Some((StatusCode::BAD_REQUEST, message).into_response());
+        }
+    };
+
+    let mut chat_req = convert::responses_to_chat(&responses_req);
+    chat_req.stream = Some(true);
+    if let Some(upstream_model) = selection.upstream_model.as_ref() {
+        chat_req.model = upstream_model.clone();
+    }
+    let chat_body = match serde_json::to_vec(&chat_req) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("[messages] failed to serialize chat request: {e}");
+            return Some((StatusCode::INTERNAL_SERVER_ERROR, "conversion error").into_response());
+        }
+    };
+
+    let upstream_url = upstream_config.url.trim_end_matches('/');
+    let target = format!("{upstream_url}/chat/completions");
+    log_upstream_target("[messages]", upstream_config, &target);
+
+    let upstream_permit = upstream.acquire_permit().await;
+    let upstream_resp = match send_with_retries("[messages]", upstream_config, || {
+        apply_upstream_auth(
+            upstream
+                .client
+                .post(&target)
+                .header("content-type", "application/json"),
+            upstream_config,
+        )
+        .body(chat_body.clone())
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if can_failover {
+                tracing::warn!("[messages] upstream request failed: {e}; failing over");
+                return None;
+            }
+            tracing::error!("[messages] upstream request failed: {e}");
+            return Some((StatusCode::BAD_GATEWAY, "upstream request failed").into_response());
+        }
+    };
+
+    let status =
+        StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    log_upstream_status("[messages]", selection, status);
+
+    if can_failover && should_retry_status(status) {
+        tracing::warn!("[messages] upstream returned {status}; failing over");
+        return None;
+    }
+
+    if status.is_client_error() || status.is_server_error() {
+        let bytes = upstream_resp.bytes().await.unwrap_or_default();
+        tracing::warn!(
+            "[messages] upstream error: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        dump_upstream_error_debug(
+            "[messages]",
+            status,
+            upstream_config,
+            &target,
+            request_json,
+            &chat_body,
+            &bytes,
+        );
+        let mut resp = Response::new(Body::from(bytes));
+        *resp.status_mut() = status;
+        resp.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        return Some(resp);
+    }
+
+    Some(stream_upstream_as_anthropic(
+        upstream_resp,
+        UpstreamApiFormat::ChatCompletions,
+        chat_req.model,
+        upstream_permit,
+    ))
+}
+
+async fn handle_responses_to_anthropic_streaming(
+    upstream: &UpstreamState,
+    selection: &UpstreamSelection<'_>,
+    request_json: &serde_json::Value,
+    can_failover: bool,
+) -> Option<Response> {
+    let upstream_config = &upstream.config;
+
+    let mut responses_req = match anthropic_value_to_responses_request(request_json) {
+        Ok(req) => req,
+        Err(message) => {
+            tracing::error!("[messages] failed to translate anthropic request: {message}");
+            return Some((StatusCode::BAD_REQUEST, message).into_response());
+        }
+    };
+    responses_req.stream = Some(true);
+    if let Some(upstream_model) = selection.upstream_model.as_ref() {
+        responses_req.model = upstream_model.clone();
+    }
+    let responses_body = match serde_json::to_vec(&responses_req) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("[messages] failed to serialize responses request: {e}");
+            return Some((StatusCode::INTERNAL_SERVER_ERROR, "conversion error").into_response());
+        }
+    };
+
+    let upstream_url = upstream_config.url.trim_end_matches('/');
+    let target = format!("{upstream_url}/responses");
+    log_upstream_target("[messages]", upstream_config, &target);
+
+    let upstream_permit = upstream.acquire_permit().await;
+    let upstream_resp = match send_with_retries("[messages]", upstream_config, || {
+        apply_upstream_auth(
+            upstream
+                .client
+                .post(&target)
+                .header("content-type", "application/json"),
+            upstream_config,
+        )
+        .body(responses_body.clone())
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if can_failover {
+                tracing::warn!("[messages] upstream request failed: {e}; failing over");
+                return None;
+            }
+            tracing::error!("[messages] upstream request failed: {e}");
+            return Some((StatusCode::BAD_GATEWAY, "upstream request failed").into_response());
+        }
+    };
+
+    let status =
+        StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    log_upstream_status("[messages]", selection, status);
+
+    if can_failover && should_retry_status(status) {
+        tracing::warn!("[messages] upstream returned {status}; failing over");
+        return None;
+    }
+
+    if status.is_client_error() || status.is_server_error() {
+        let bytes = upstream_resp.bytes().await.unwrap_or_default();
+        tracing::warn!(
+            "[messages] upstream error: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        dump_upstream_error_debug(
+            "[messages]",
+            status,
+            upstream_config,
+            &target,
+            request_json,
+            &responses_body,
+            &bytes,
+        );
+        let mut resp = Response::new(Body::from(bytes));
+        *resp.status_mut() = status;
+        resp.headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        return Some(resp);
+    }
+
+    Some(stream_upstream_as_anthropic(
+        upstream_resp,
+        UpstreamApiFormat::Responses,
+        responses_req.model,
+        upstream_permit,
+    ))
 }
 
 /// Chat Completions upstream + non-streaming Anthropic downstream.

@@ -19,8 +19,16 @@ import { useConfig } from "@/hooks/use-config";
 import type { Config, LoadBalanceStrategy } from "@/lib/types";
 
 interface AliasRow {
+  id: string;
   source: string;
   target: string;
+}
+
+let nextAliasRowId = 0;
+
+function createAliasRow(source: string, target: string): AliasRow {
+  nextAliasRowId += 1;
+  return { id: String(nextAliasRowId), source, target };
 }
 
 export function RoutingPage() {
@@ -33,14 +41,10 @@ export function RoutingPage() {
     setDraft(config);
     setAliasRows(
       Object.entries(config.routing.model_aliases ?? {}).map(
-        ([source, target]) => ({ source, target }),
+        ([source, target]) => createAliasRow(source, target),
       ),
     );
   }, [config]);
-
-  useEffect(() => {
-    if (error) toast.error(error);
-  }, [error]);
 
   const setRouting = <K extends keyof Config["routing"]>(
     key: K,
@@ -73,6 +77,9 @@ export function RoutingPage() {
 
   return (
     <div className="grid gap-4 p-4 md:grid-cols-2">
+      {error ? (
+        <p className="font-mono text-sm text-coral-400 md:col-span-2">{error}</p>
+      ) : null}
       <Panel title={t("routing.titleRouting")}>
         <div className="grid gap-4">
           <Field label={t("routing.loadBalance")}>
@@ -125,10 +132,10 @@ export function RoutingPage() {
             size="sm"
             variant="ghost"
             onClick={() =>
-              setAliasRows((prev) => prev.concat({ source: "", target: "" }))
+              setAliasRows((prev) => prev.concat(createAliasRow("", "")))
             }
           >
-            <Plus className="h-3.5 w-3.5" />
+            <Plus className="size-3.5" />
             {t("routing.addRow")}
           </Button>
         }
@@ -139,16 +146,16 @@ export function RoutingPage() {
           </p>
         ) : (
           <div className="space-y-2">
-            {aliasRows.map((row, index) => (
-              <div key={index} className="flex items-center gap-2">
+            {aliasRows.map((row) => (
+              <div key={row.id} className="flex items-center gap-2">
                 <Input
                   className="flex-1"
                   value={row.source}
                   placeholder={t("routing.aliasSource")}
                   onChange={(e) =>
                     setAliasRows((prev) =>
-                      prev.map((r, i) =>
-                        i === index ? { ...r, source: e.target.value } : r,
+                      prev.map((r) =>
+                        r.id === row.id ? { ...r, source: e.target.value } : r,
                       ),
                     )
                   }
@@ -162,8 +169,8 @@ export function RoutingPage() {
                   placeholder={t("routing.aliasTarget")}
                   onChange={(e) =>
                     setAliasRows((prev) =>
-                      prev.map((r, i) =>
-                        i === index ? { ...r, target: e.target.value } : r,
+                      prev.map((r) =>
+                        r.id === row.id ? { ...r, target: e.target.value } : r,
                       ),
                     )
                   }
@@ -173,10 +180,10 @@ export function RoutingPage() {
                   variant="danger"
                   aria-label={t("routing.removeAlias")}
                   onClick={() =>
-                    setAliasRows((prev) => prev.filter((_, i) => i !== index))
+                    setAliasRows((prev) => prev.filter((r) => r.id !== row.id))
                   }
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 className="size-3.5" />
                 </Button>
               </div>
             ))}
@@ -189,7 +196,7 @@ export function RoutingPage() {
           {t("common.discard")}
         </Button>
         <Button variant="primary" onClick={() => void persist()}>
-          <Save className="h-3.5 w-3.5" />
+          <Save className="size-3.5" />
           {t("routing.saveAction")}
         </Button>
       </div>

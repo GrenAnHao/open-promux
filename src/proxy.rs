@@ -6,6 +6,7 @@ use axum::{
 };
 use futures::StreamExt;
 use reqwest::{Client, Proxy, RequestBuilder};
+use serde::Serialize;
 use std::{
     collections::HashSet,
     sync::{
@@ -32,6 +33,18 @@ pub struct AppState {
     global_request_limiter: Option<FixedWindowRateLimiter>,
     global_token_limiter: Option<FixedWindowRateLimiter>,
     traffic_stats: Arc<TrafficStats>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UpstreamHealthSnapshot {
+    pub index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub url: String,
+    pub api_format: UpstreamApiFormat,
+    pub checked: bool,
+    pub healthy: bool,
+    pub failures: u64,
 }
 
 struct UpstreamState {
@@ -68,7 +81,16 @@ struct FixedWindowRateWindow {
 
 #[derive(Clone, Copy)]
 struct UpstreamHealth {
+    checked: bool,
     healthy: bool,
+    failures: u64,
+}
+
+#[derive(Clone, Copy)]
+struct UpstreamHealthUpdate {
+    first_check: bool,
+    previous_healthy: bool,
+    current_healthy: bool,
     failures: u64,
 }
 
@@ -116,6 +138,23 @@ impl AppState {
         self.traffic_stats.clone()
     }
 
+    pub async fn upstream_health_snapshot(&self) -> Vec<UpstreamHealthSnapshot> {
+        let mut snapshot = Vec::with_capacity(self.upstreams.len());
+        for (index, upstream) in self.upstreams.iter().enumerate() {
+            let health = upstream.health.read().await;
+            snapshot.push(UpstreamHealthSnapshot {
+                index,
+                name: upstream.config.name.clone(),
+                url: upstream.config.url.clone(),
+                api_format: upstream.config.api_format,
+                checked: health.checked,
+                healthy: health.healthy,
+                failures: health.failures,
+            });
+        }
+        snapshot
+    }
+
     fn select_index(&self, len: usize) -> usize {
         match self.config.routing.load_balance {
             LoadBalanceStrategy::First => 0,
@@ -160,6 +199,7 @@ impl UpstreamState {
             request_limiter,
             token_limiter,
             health: tokio::sync::RwLock::new(UpstreamHealth {
+                checked: false,
                 healthy: true,
                 failures: 0,
             }),
@@ -205,8 +245,15 @@ impl UpstreamState {
         self.health.read().await.healthy
     }
 
-    async fn set_health_check_result(&self, healthy: bool, unhealthy_after_failures: u64) {
+    async fn set_health_check_result(
+        &self,
+        healthy: bool,
+        unhealthy_after_failures: u64,
+    ) -> UpstreamHealthUpdate {
         let mut health = self.health.write().await;
+        let first_check = !health.checked;
+        let previous_healthy = health.healthy;
+        health.checked = true;
         if healthy {
             health.healthy = true;
             health.failures = 0;
@@ -215,6 +262,12 @@ impl UpstreamState {
             if health.failures >= unhealthy_after_failures {
                 health.healthy = false;
             }
+        }
+        UpstreamHealthUpdate {
+            first_check,
+            previous_healthy,
+            current_healthy: health.healthy,
+            failures: health.failures,
         }
     }
 
@@ -296,6 +349,7 @@ mod messages;
 mod models;
 mod rectifier;
 mod responses;
+mod stream_bridge;
 mod support;
 
 pub use chat::chat_completions;
@@ -303,6 +357,7 @@ pub use messages::messages;
 pub use models::models;
 use rectifier::*;
 pub use responses::responses;
+use stream_bridge::*;
 use support::*;
 
 #[cfg(test)]

@@ -20,7 +20,7 @@ pub async fn models(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
         let _upstream_permit = upstream.acquire_permit().await;
 
         let upstream_resp = match send_with_retries("[models]", upstream_config, || {
-            apply_upstream_auth(upstream.client.get(&target), upstream_config)
+            apply_model_list_headers(upstream.client.get(&target), upstream_config)
         })
         .await
         {

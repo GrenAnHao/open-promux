@@ -61,6 +61,10 @@
 | 🌀 **Responses 上游** | `api_format = "responses"` 让上游本身说 Responses API；`/v1/responses` 走完全直通（完整流式 SSE），`/v1/messages` / `/v1/chat/completions` 均可转换。 |
 | 📊 **流量统计** | 按模型 / 按上游的实时计数器：请求 / 成功 / 失败 / 入出字节 / 延迟平均 & 最大。桌面控制台 Stats 页可见。 |
 | 🚀 **性能** | 每上游一个长连接 `reqwest` client，自动协商 HTTP/2，Tokio 多线程 runtime。 |
+| 🧭 **监听范围** | 设置页提供 **本地 / 全局** segmented 单选和感叹号提示：`127.0.0.1` 仅本机可访问，`0.0.0.0` 同网段/外网可达。 |
+| 🪪 **下游接口面板** | Dashboard 新增独立面板，列出网关 base URL 与三个客户端 endpoint（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`），一键复制。通配绑定（`0.0.0.0`）会展示为可用的本机地址。 |
+| 🩺 **调试面板** | 设置页可选启用“调试”区块：选择 tracing 日志等级（下次启动生效）、将每次请求落盘到 `./debug/conversation-*.json`、一键打开调试目录。默认关闭，感叹号提示会明确告知启用后对话内容会写入本地。 |
+| 🌈 **按等级着色的 toast** | success / info / warning / error / loading 分别用 mint / sky / amber / coral / ink 主题色的图标与边框，操作结果一眼可辨。 |
 
 <details>
 <summary><strong>📚 完整功能列表（点击展开）</strong></summary>
@@ -169,11 +173,11 @@ pnpm --dir desktop build        # 当前平台正式打包
 
 | 页面 | 能做什么 |
 | --- | --- |
-| **Dashboard** | 实时状态（绑定地址 / 在线时长 / 在线指示灯）、上游探测表。 |
-| **Upstreams** | 弹窗表单 CRUD：api_key、auth_header、weight、超时、proxy。 |
+| **Dashboard** | 实时状态（绑定地址 / 在线时长 / 在线指示灯）。上游表格每行一个上游：格式、健康徽标、内联模型下拉、刷新和对话探测按钮。模型列表跨 Tab 切换复用缓存——来回切 Tab 不会重新请求上游 `/v1/models`，只有刷新按钮才强制拉取。探测结果以 toast 形式呈现。新增 **下游接口** 面板：列出网关 base URL 和 `/v1/chat/completions`、`/v1/responses`、`/v1/messages` 三个完整 URL，一键复制。Panel 铺满可视区高度，自带横向 / 纵向滚动条，表格再宽也不会把页面拉坏。 |
+| **Upstreams** | 弹窗表单 CRUD；`api_format` 支持 `chat_completions`、`anthropic_messages`、`responses` 三种。同时暴露 api_key、auth_header、proxy + proxy type、每上游并发 / RPM / TPM。表格铺满可视区并自带滚动。 |
 | **Routing** | 负载均衡 / 健康 / 故障转移 / 模型别名规则。 |
 | **Logs** | 虚拟滚动日志流（每秒数千行也不卡顿），等级过滤、tail 开关、复制 / 清空。 |
-| **Settings** | 端口、auth_key、性能、健康、矫正器、自启动、语言。 |
+| **Settings** | **监听范围**（本地 `127.0.0.1` / 全局 `0.0.0.0`，带感叹号提示）、端口、auth_key、性能、健康、矫正器、**调试**（日志等级 + 对话落盘 + 打开调试目录）、自启动、语言。 |
 | **Stats** | 按模型 / 按上游的流量统计：请求次数、token 用量、延迟。 |
 
 视觉风格：深碳底色（`#0B0F14`）+ 薄荷绿点缀（`#5BE7C4`），1px 边框，
@@ -182,6 +186,22 @@ pnpm --dir desktop build        # 当前平台正式打包
 
 双语：英文 / 简体中文，可在顶栏或 Settings 切换；选择持久化在网关
 配置旁边的 `desktop_preferences.toml` 文件中。
+
+### 界面截图
+
+<div align="center">
+
+| 概览 · 系统 + 上游 | 概览 · 下游接口面板 |
+| :---: | :---: |
+| ![概览 1](./images/概览1.png) | ![概览 2](./images/概览2.png) |
+| **上游管理** | **新增上游** |
+| ![上游管理](./images/上游管理.png) | ![新增上游](./images/新增上游.png) |
+| **路由配置** | **设置** |
+| ![路由配置](./images/路由配置.png) | ![设置](./images/设置.png) |
+| **流量统计** | **日志** |
+| ![流量统计](./images/流量统计.png) | ![日志](./images/日志.png) |
+
+</div>
 
 ---
 
@@ -263,6 +283,7 @@ RPM / TPM 限制使用固定 60 秒窗口。任何限制省略或设为 `0` 即�
 | `upstream.url` / `upstreams[].url` | 必选其一 | — | 上游 base URL，通常以 `/v1` 结尾 |
 | `upstream.api_key` / `upstreams[].api_key` | 否 | 空 | 上游认证 key |
 | `upstream.auth_header` / `upstreams[].auth_header` | 否 | `Authorization` | 上游认证 header 名 |
+| `upstream.api_format` / `upstreams[].api_format` | 否 | `chat_completions` | 取值：`chat_completions`、`anthropic_messages`、`responses` |
 | `upstreams[].name` | 否 | — | 路由前缀，生成 `name:model` |
 | `routing.load_balance` | 否 | `first_match` | `first_match` 或 `round_robin` |
 | `routing.automatic_failover` | 否 | `false` | 可重试错误后切下一个上游 |
@@ -308,8 +329,8 @@ curl http://127.0.0.1:8080/v1/messages \
 | 上游 `api_format` | 行为 |
 | --- | --- |
 | `anthropic_messages` | 直通转发；完整流式 SSE + rectifier + 重试。 |
-| `chat_completions` | Anthropic ⇄ Chat 转换（当前仅非流式；流式返回 `501`，并提示使用已双向支持的 `/v1/responses`）。 |
-| `responses` | Anthropic ⇄ Responses 转换（当前仅非流式；流式返回 `501`）。 |
+| `chat_completions` | Anthropic ⇄ Chat 转换；支持流式 + 非流式。 |
+| `responses` | Anthropic ⇄ Responses 转换；支持流式 + 非流式。 |
 
 ### 「无极上下游」矩阵
 
@@ -318,8 +339,8 @@ curl http://127.0.0.1:8080/v1/messages \
 | 下游 ↓ \ 上游 → | `chat_completions` | `anthropic_messages` | `responses` |
 | --- | --- | --- | --- |
 | `/v1/responses` | ✅ 流式 + 非流式 | ✅ 流式 + 非流式 | ✅ 流式 + 非流式 **直通** |
-| `/v1/messages` | ✅ 非流式（流式 `501`） | ✅ 流式 + 非流式 **直通** | ✅ 非流式（流式 `501`） |
-| `/v1/chat/completions` | ✅ 流式 + 非流式 **直通** | ✅ 非流式（流式 `501`） | ✅ 非流式（流式 `501`） |
+| `/v1/messages` | ✅ 流式 + 非流式 | ✅ 流式 + 非流式 **直通** | ✅ 流式 + 非流式 |
+| `/v1/chat/completions` | ✅ 流式 + 非流式 **直通** | ✅ 流式 + 非流式 | ✅ 流式 + 非流式 |
 
 **TL;DR**：客户端选下游协议；按提供方真实接口选上游 `api_format`；
 两端格式一致时直通、不一致时网关翻译，对客户端无感。
