@@ -1,3 +1,6 @@
+# Manual publish workflow for the @grenanhao/open-promux npm package.
+# Trigger from the Actions tab after pushing a `v*` tag.
+
 name: Publish NPM
 
 on:
